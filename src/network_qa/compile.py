@@ -1,7 +1,7 @@
 """Compile registered exclusion generators into one provenance-stamped lockfile.
 
-network_qa's compile is a leaner, in-memory reimplementation of neuro_workflow's
-`core/exclusions.py` compile step: generators run directly (no sources/*.json
+network_qa's compile is a leaner, in-memory reimplementation of the monolith
+pipeline's `core/exclusions.py` compile step: generators run directly (no sources/*.json
 disk cache, no manual force-include/force-exclude overrides file -- that
 persistence + override layer isn't part of this plan's scope). The output is
 a single self-contained lockfile `{"_meta": ..., "exclusions": [...]}` rather
