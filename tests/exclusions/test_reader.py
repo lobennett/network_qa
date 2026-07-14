@@ -67,6 +67,34 @@ def test_non_exclude_action_is_ignored():
     assert is_excluded("sub-s02", "ses-05", "task-rest", "run-1", fi_entries) is False
 
 
+def test_motion_entry_is_enforceable(tmp_path):
+    """Regression: a motion-sourced entry must be matched by a prefixed query.
+
+    Before the source fix, motion emitted BARE subject/session ("s03"/"05")
+    straight from motion_qa's TSV, so is_excluded("sub-s03","ses-05",...) would
+    silently MISS it -- motion exclusions were unenforceable. With motion now
+    emitting prefixed entities, the prefixed query matches.
+    """
+    from argparse import Namespace
+    import pandas as pd
+    from network_qa.exclusions.motion import MotionGenerator
+
+    tsv = tmp_path / "motion_metrics.tsv"
+    pd.DataFrame([
+        {"subject": "s03", "session": "05", "task": "rest", "run": "1",
+         "fmriprep_fd_mean": 0.30, "fmriprep_proportion_fd_over_0.5": 0.0,
+         "fmriprep_proportion_std_dvars_over_1.5": 0.0},
+    ]).to_csv(tsv, sep="\t", index=False)
+
+    args = Namespace(motion_metrics_tsv=str(tsv), fd_threshold=0.2,
+                     proportion_fd_threshold=0.2, proportion_dvars_threshold=0.2)
+    entries = MotionGenerator().generate("discovery", {}, args)
+
+    assert is_excluded("sub-s03", "ses-05", "task-rest", "run-1", entries) is True
+    # ...and the bare-entity query still does not match (no normalization).
+    assert is_excluded("s03", "05", "rest", "1", entries) is False
+
+
 def test_reader_over_a_compiled_lockfile_list():
     """End-to-end: compile a lockfile in-memory, then query its exclusions list."""
     from argparse import Namespace

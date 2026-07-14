@@ -75,6 +75,9 @@ def is_excluded(subject: str, session: str, task: str, run: str,
     whose action is in {"exclude", "trim"}. No entity normalization — the
     lockfile stores BIDS-prefixed entities and the caller queries with the same
     prefixed form (normalization is the caller's responsibility).
+
+    Uses `e.get("action")` (a defensive superset of the monolith's `e["action"]`)
+    so an entry missing the field is skipped rather than raising KeyError.
     """
     key = (subject, session, task, run)
     return any(

@@ -35,10 +35,11 @@ def test_motion_flags_rest_fd_and_task_prop(tmp_path):
                      proportion_fd_threshold=0.2, proportion_dvars_threshold=0.2)
     out = gen.generate("discovery", {}, args)
     keys = {(e["subject"], e["task"]) for e in out}
-    # NOTE: plan draft asserted bare task names ("rest"/"stroop"); every other
-    # generator (lev1_outlier, qa_decisions) and render.py's _bold_relpath
-    # expect the BIDS-prefixed "task-<name>" form, which is what the
-    # implementation actually emits — asserting the prefixed form here to
-    # match that established, codebase-wide convention.
-    assert keys == {("s03", "task-rest"), ("s03", "task-stroop")}   # nback passes
+    # All four generators emit BIDS-prefixed entities (sub-/ses-/task-/run-),
+    # matching the monolith + what is_excluded/lev1 query with. motion_qa's TSV
+    # stores bare subject/session, so the generator must add the sub-/ses-
+    # prefixes at the source (task/run get task-/run- prefixes too).
+    assert keys == {("sub-s03", "task-rest"), ("sub-s03", "task-stroop")}   # nback passes
+    assert all(e["subject"] == "sub-s03" and e["session"] == "ses-05" for e in out)
+    assert all(e["run"] == "run-1" for e in out)
     assert all(e["action"] == "exclude" and e["source"] == "motion" for e in out)

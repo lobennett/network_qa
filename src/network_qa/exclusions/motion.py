@@ -53,8 +53,12 @@ class MotionGenerator:
             if prop_dv > pdv_t:
                 reasons.append(f"Proportion std_dvars>1.5 ({prop_dv:.3f}) > {pdv_t}")
             if reasons:
+                # motion_qa's TSV stores BARE subject/session; add sub-/ses-
+                # prefixes here so all four generators emit the same
+                # BIDS-prefixed convention as the monolith (matches what
+                # is_excluded/lev1 query with, and what render.py expects).
                 entries.append({
-                    "subject": str(row["subject"]), "session": str(row["session"]),
+                    "subject": f"sub-{row['subject']}", "session": f"ses-{row['session']}",
                     "task": f"task-{task}", "run": f"run-{row['run']}",
                     "source": "motion", "action": "exclude", "reason": "; ".join(reasons),
                 })

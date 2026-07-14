@@ -37,3 +37,26 @@ def test_render_bidsignore_invalid_only(tmp_path):
     lines = render_bidsignore(entries, out)
     assert lines == ["sub-s03/ses-01/func/sub-s03_ses-01_task-x_run-1_bold.nii.gz"]
     assert out.read_text().strip() == lines[0]
+
+
+def test_render_robust_to_prefixed_entities(tmp_path):
+    """Regression: entries carry BIDS-prefixed subject/session (sub-s03/ses-05)
+    -- the normal case now that all generators emit prefixed. render must NOT
+    double-prefix them into garbage paths (sub-sub-s03/ses-ses-05/...).
+    """
+    # scans.tsv from a prefixed entry.
+    prefixed = [{"subject": "sub-s03", "session": "ses-05", "task": "task-rest",
+                 "run": "run-1", "reason": "High FD", "source": "motion"}]
+    render_scans_tsv(prefixed, tmp_path)
+    tsv = tmp_path / "sub-s03" / "ses-05" / "sub-s03_ses-05_scans.tsv"
+    assert tsv.is_file(), "must NOT write sub-sub-s03/ses-ses-05"
+    assert "func/sub-s03_ses-05_task-rest_run-1_bold.nii.gz" in tsv.read_text()
+    assert not (tmp_path / "sub-sub-s03").exists()
+
+    # bidsignore from a prefixed invalid entry.
+    inv = [{"subject": "sub-s03", "session": "ses-01", "task": "task-x",
+            "run": "run-1", "reason": "aborted", "source": "invalid"}]
+    out = tmp_path / ".bidsignore"
+    lines = render_bidsignore(inv, out)
+    assert lines == ["sub-s03/ses-01/func/sub-s03_ses-01_task-x_run-1_bold.nii.gz"]
+    assert "sub-sub-s03" not in out.read_text()
