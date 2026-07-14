@@ -58,3 +58,25 @@ def load_lockfile(path) -> list[dict]:
     """Read exclusions from a lockfile; accepts wrapped {_meta,exclusions} or bare list."""
     data = json.loads(Path(path).read_text())
     return data["exclusions"] if isinstance(data, dict) else data
+
+
+def _scan_key(entry: dict) -> tuple:
+    return (entry["subject"], entry["session"], entry["task"], entry["run"])
+
+
+def is_excluded(subject: str, session: str, task: str, run: str,
+                exclusions: list[dict]) -> bool:
+    """Return True if the given scan is excluded in the compiled exclusions list.
+
+    Consumer-side query helper for network_glm/lev1 (pass an already-loaded
+    exclusions list, e.g. from `load_lockfile`). Matches the monolith's
+    core/exclusions.py::is_excluded exactly: an EXACT tuple match on
+    (subject, session, task, run) against each entry, considering only entries
+    whose action is in {"exclude", "trim"}. No entity normalization — the
+    lockfile stores BIDS-prefixed entities and the caller queries with the same
+    prefixed form (normalization is the caller's responsibility).
+    """
+    key = (subject, session, task, run)
+    return any(
+        _scan_key(e) == key for e in exclusions if e.get("action") in ("exclude", "trim")
+    )
