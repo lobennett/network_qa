@@ -6,10 +6,13 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "nibabel>=5",
+    "pandas",
+    "network_events @ git+https://github.com/lobennett/network_events.git@a45ef4c",
 ]
 
 [project.scripts]
 nf-qa-runs = "network_qa.qa_runs:main"
+network-qa = "network_qa.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
@@ -17,6 +20,9 @@ dev = ["pytest>=8"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/network_qa"]
