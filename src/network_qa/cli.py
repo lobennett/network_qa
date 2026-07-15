@@ -18,6 +18,7 @@ from network_qa.exclusions import behavioral  # noqa: F401
 from network_qa.exclusions import motion  # noqa: F401
 from network_qa.exclusions import lev1_outlier  # noqa: F401
 from network_qa.exclusions import qa_decisions  # noqa: F401
+from network_qa.exclusions import short_run  # noqa: F401
 
 from network_qa.exclusions.base import list_generators
 from network_qa.compile import compile_exclusions, write_lockfile, load_lockfile
