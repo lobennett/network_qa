@@ -12,7 +12,7 @@ stays testable and reusable.
 |--------|------|
 | `qa_runs` | flag short functional runs by per-task cohort-mean volume count (`flag_short_runs` is pure + unit-tested; `scan_bold_volumes` reads NIfTI headers) → CLI `nf-qa-runs` (also reachable as `network-qa qa-runs`) |
 | `exclusions.base` | generator registry (`register_generator`/`get_generator`/`list_generators`) + provenance helpers (`make_meta`, `_git_sha`) |
-| `exclusions.behavioral` | wraps `network_events.qc.run_qc` (accuracy/RT/omission thresholds) as a generator |
+| `exclusions.behavioral` | wraps `network_events.qc.run_qc` (accuracy/RT/omission thresholds) as a generator; also reads the `_events.json` sidecar `network_events` writes next to each `_events.tsv` and excludes any run whose `FractionTestTrialsDropped` (from non-monotonic-onset truncation) is `> nonmonotonic_exclude_fraction` (default 0.5, matching the monolith's `NONMONOTONIC_EXCLUDE_FRACTION`) |
 | `exclusions.motion` | reads `motion_qa`'s `motion_metrics.tsv`, applies study FD/DVARS thresholds |
 | `exclusions.lev1_outlier` | auto-excludes scans flagged by cohort lev1 QC (vif/outlier-pct rules); dormant until `network_glm` produces its input CSV |
 | `exclusions.qa_decisions` | expands a manually-reviewed decisions TSV (`decisions.py`) into per-scan exclusions |
@@ -60,6 +60,14 @@ exclusions, so those are NOT in it. `scans.tsv` carries the per-scan "why".
 `.bidsignore` holds only genuinely-invalid scans (`source == "invalid"`);
 everything else that's excluded for quality reasons is enforced downstream,
 at lev1, by reading the lockfile directly.
+
+**Truncation vs. decision split**: `network_events` detects the non-monotonic-onset
+ExpFactory clock glitch, truncates the run's events at that point, and writes the
+resulting trial-retention counts as a machine-readable `_events.json` sidecar
+(`NTestTrialsExpected` / `NTestTrialsRetained` / `FractionTestTrialsDropped`) — it
+makes no exclusion decision. `exclusions.behavioral` is where that decision is
+made: a run whose dropped fraction exceeds the threshold is excluded
+(`source="behavioral-qc"`, `reason` cites the dropped/expected counts).
 
 The operational compile against real cohorts is gated on upstream inputs that
 don't exist yet: `motion` needs fMRIPrep run on `discovery_v2`, and

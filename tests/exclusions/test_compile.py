@@ -137,6 +137,41 @@ def test_compile_with_qa_decisions_generator_flows_through(tmp_path):
     assert "noisy" in e["reason"]
 
 
+def test_compile_with_behavioral_nonmonotonic_generator_flows_through(tmp_path):
+    """Integration coverage for the behavioral generator's non-monotonic
+    trial-retention rule: an _events.json sidecar over threshold flows through
+    compile into the wrapped, provenance-stamped lockfile."""
+    import json
+    from network_qa.exclusions.behavioral import BehavioralGenerator
+
+    register_generator(BehavioralGenerator())
+
+    func_dir = tmp_path / "sub-s03" / "ses-02" / "func"
+    func_dir.mkdir(parents=True)
+    sidecar = func_dir / "sub-s03_ses-02_task-cuedTS_run-1_events.json"
+    sidecar.write_text(json.dumps({
+        "NTestTrialsExpected": 20,
+        "NTestTrialsRetained": 5,
+        "FractionTestTrialsDropped": 0.75,
+    }))
+
+    args = Namespace(nonmonotonic_exclude_fraction=0.5)
+    lock = nqc.compile_exclusions(
+        "discovery", {"bids_dir": str(tmp_path)}, args, generator_names=["behavioral"],
+    )
+    compiled = lock["exclusions"]
+    assert len(compiled) == 1
+    e = compiled[0]
+    assert e["subject"] == "sub-s03"
+    assert e["session"] == "ses-02"
+    assert e["task"] == "task-cuedTS"
+    assert e["run"] == "run-1"
+    assert e["source"] == "behavioral-qc"
+    assert e["action"] == "exclude"
+    assert "15/20" in e["reason"]
+    assert lock["_meta"]["n_exclusions"] == 1
+
+
 def test_compile_with_lev1_outlier_generator_flows_through(tmp_path):
     """Integration coverage for the real lev1_outlier generator (see note
     on test_compile_with_qa_decisions_generator_flows_through)."""
