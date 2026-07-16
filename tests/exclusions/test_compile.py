@@ -139,16 +139,17 @@ def test_compile_with_qa_decisions_generator_flows_through(tmp_path):
 
 def test_compile_with_behavioral_nonmonotonic_generator_flows_through(tmp_path):
     """Integration coverage for the behavioral generator's non-monotonic
-    trial-retention rule: an _events.json sidecar over threshold flows through
-    compile into the wrapped, provenance-stamped lockfile."""
+    trial-retention rule: a truncation-QC sidecar (sourcedata/events_qc/...)
+    over threshold flows through compile into the wrapped, provenance-stamped
+    lockfile."""
     import json
     from network_qa.exclusions.behavioral import BehavioralGenerator
 
     register_generator(BehavioralGenerator())
 
-    func_dir = tmp_path / "sub-s03" / "ses-02" / "func"
-    func_dir.mkdir(parents=True)
-    sidecar = func_dir / "sub-s03_ses-02_task-cuedTS_run-1_events.json"
+    sidecar_dir = tmp_path / "sourcedata" / "events_qc" / "sub-s03" / "ses-02"
+    sidecar_dir.mkdir(parents=True)
+    sidecar = sidecar_dir / "sub-s03_ses-02_task-cuedTS_run-1_desc-truncation.json"
     sidecar.write_text(json.dumps({
         "NTestTrialsExpected": 20,
         "NTestTrialsRetained": 5,

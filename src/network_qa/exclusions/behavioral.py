@@ -3,11 +3,15 @@
 Also applies the monolith's non-monotonic-onset-truncation exclusion rule (see
 `_scan_nonmonotonic_exclusions`): `network_events` truncates a run at the first
 backward-clock ExpFactory glitch and writes the resulting trial-retention
-metric as a `_events.json` sidecar next to each `_events.tsv`
+metric as a truncation-QC sidecar at
+`sourcedata/events_qc/<sub>/<ses>/<sub>_<ses>_task-<task>_run-<run>_desc-truncation.json`
 (`NTestTrialsExpected` / `NTestTrialsRetained` / `FractionTestTrialsDropped`);
-`network_events` makes no exclusion decision from that number. This generator
-reads those sidecars and excludes any run whose dropped fraction exceeds
-`nonmonotonic_exclude_fraction` — the decision half of that split.
+`network_events` makes no exclusion decision from that number. The sidecar lives
+under `sourcedata/` with a non-reserved `_desc-truncation` name (not as an
+`_events.json` in `func/`, which BIDS reserves for events-column descriptions
+and bids-validator would reject). This generator reads those sidecars and
+excludes any run whose dropped fraction exceeds `nonmonotonic_exclude_fraction`
+— the decision half of that split.
 """
 from __future__ import annotations
 
@@ -22,8 +26,8 @@ from network_qa.exclusions.base import load_dataset_subjects, register_generator
 # Matches neuro_workflow.events.qc.NONMONOTONIC_EXCLUDE_FRACTION exactly.
 NONMONOTONIC_EXCLUDE_FRACTION = 0.5
 
-_EVENTS_JSON_RE = re.compile(
-    r"^(?P<subject>sub-[^_]+)_(?P<session>ses-[^_]+)_task-(?P<task>[^_]+)_run-(?P<run>[^_]+)_events\.json$"
+_TRUNCATION_JSON_RE = re.compile(
+    r"^(?P<subject>sub-[^_]+)_(?P<session>ses-[^_]+)_task-(?P<task>[^_]+)_run-(?P<run>[^_]+)_desc-truncation\.json$"
 )
 
 
@@ -36,9 +40,9 @@ class Thresholds:
 def _scan_nonmonotonic_exclusions(
     bids_dir: Path, threshold: float, subjects: set[str] | None = None,
 ) -> list[dict]:
-    """Scan `sub-*/ses-*/func/*_events.json` sidecars network_events writes and
-    emit one exclusion entry per run whose `FractionTestTrialsDropped` exceeds
-    `threshold`.
+    """Scan `sourcedata/events_qc/sub-*/ses-*/*_desc-truncation.json` sidecars
+    network_events writes and emit one exclusion entry per run whose
+    `FractionTestTrialsDropped` exceeds `threshold`.
 
     Matches neuro_workflow.events.qc.run_qc's non-monotonic-truncation rule
     exactly: strict `>` comparison (a run dropping EXACTLY the threshold
@@ -49,8 +53,8 @@ def _scan_nonmonotonic_exclusions(
     needed: this already emits one entry per (subject, session, task, run).
     """
     entries: list[dict] = []
-    for sidecar in sorted(bids_dir.glob("sub-*/ses-*/func/*_events.json")):
-        m = _EVENTS_JSON_RE.match(sidecar.name)
+    for sidecar in sorted(bids_dir.glob("sourcedata/events_qc/sub-*/ses-*/*_desc-truncation.json")):
+        m = _TRUNCATION_JSON_RE.match(sidecar.name)
         if not m:
             continue
         subject = m.group("subject")
@@ -107,7 +111,8 @@ class BehavioralGenerator:
             type=float,
             default=NONMONOTONIC_EXCLUDE_FRACTION,
             help=(
-                "Exclude a run if network_events' _events.json sidecar reports "
+                "Exclude a run if network_events' truncation-QC sidecar "
+                "(sourcedata/events_qc/.../_desc-truncation.json) reports "
                 "FractionTestTrialsDropped strictly greater than this "
                 f"(default {NONMONOTONIC_EXCLUDE_FRACTION})."
             ),

@@ -71,11 +71,14 @@ class TestBehavioralGenerator:
         assert required.issubset(entry.keys())
 
 
-def _write_sidecar(func_dir: Path, subject: str, session: str, task: str, run: str,
+def _write_sidecar(bids_dir: Path, subject: str, session: str, task: str, run: str,
                     expected: int, retained: int, fraction: float) -> Path:
-    func_dir.mkdir(parents=True, exist_ok=True)
-    name = f"{subject}_{session}_task-{task}_run-{run}_events.json"
-    path = func_dir / name
+    """Write a truncation-QC sidecar at the new sourcedata/events_qc location
+    (network_events no longer writes _events.json into func/)."""
+    sidecar_dir = bids_dir / "sourcedata" / "events_qc" / subject / session
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    name = f"{subject}_{session}_task-{task}_run-{run}_desc-truncation.json"
+    path = sidecar_dir / name
     path.write_text(json.dumps({
         "NTestTrialsExpected": expected,
         "NTestTrialsRetained": retained,
@@ -88,12 +91,12 @@ class TestNonmonotonicExclusionRule:
     """The >50%-test-trials-dropped policy ported from neuro_workflow.events.qc
     (NONMONOTONIC_EXCLUDE_FRACTION = 0.5, strict `>` comparison). This is the
     decision half of the truncation/decision split: network_events computes +
-    writes the _events.json sidecar (truncation), network_qa reads it and
-    decides whether to exclude the scan (this module)."""
+    writes the sourcedata/events_qc/.../_desc-truncation.json sidecar
+    (truncation), network_qa reads it and decides whether to exclude the scan
+    (this module)."""
 
     def test_excludes_run_over_threshold(self, tmp_path):
-        func_dir = tmp_path / "sub-s01" / "ses-01" / "func"
-        _write_sidecar(func_dir, "sub-s01", "ses-01", "stopSignal", "1",
+        _write_sidecar(tmp_path, "sub-s01", "ses-01", "stopSignal", "1",
                        expected=10, retained=3, fraction=0.7)
 
         entries = _scan_nonmonotonic_exclusions(tmp_path, NONMONOTONIC_EXCLUDE_FRACTION)
@@ -115,16 +118,14 @@ class TestNonmonotonicExclusionRule:
         }
 
     def test_keeps_run_under_threshold(self, tmp_path):
-        func_dir = tmp_path / "sub-s01" / "ses-01" / "func"
-        _write_sidecar(func_dir, "sub-s01", "ses-01", "stopSignal", "1",
+        _write_sidecar(tmp_path, "sub-s01", "ses-01", "stopSignal", "1",
                        expected=10, retained=7, fraction=0.3)
 
         entries = _scan_nonmonotonic_exclusions(tmp_path, NONMONOTONIC_EXCLUDE_FRACTION)
         assert entries == []
 
     def test_keeps_run_zero_dropped(self, tmp_path):
-        func_dir = tmp_path / "sub-s01" / "ses-01" / "func"
-        _write_sidecar(func_dir, "sub-s01", "ses-01", "stopSignal", "1",
+        _write_sidecar(tmp_path, "sub-s01", "ses-01", "stopSignal", "1",
                        expected=10, retained=10, fraction=0.0)
 
         entries = _scan_nonmonotonic_exclusions(tmp_path, NONMONOTONIC_EXCLUDE_FRACTION)
@@ -134,16 +135,14 @@ class TestNonmonotonicExclusionRule:
         """The monolith uses strict `>` (events/qc.py:
         `tstats["fraction_test_dropped"] > NONMONOTONIC_EXCLUDE_FRACTION`) --
         a run dropping EXACTLY the threshold fraction is NOT excluded."""
-        func_dir = tmp_path / "sub-s01" / "ses-01" / "func"
-        _write_sidecar(func_dir, "sub-s01", "ses-01", "stopSignal", "1",
+        _write_sidecar(tmp_path, "sub-s01", "ses-01", "stopSignal", "1",
                        expected=10, retained=5, fraction=0.5)
 
         entries = _scan_nonmonotonic_exclusions(tmp_path, NONMONOTONIC_EXCLUDE_FRACTION)
         assert entries == []
 
     def test_just_over_threshold_is_excluded(self, tmp_path):
-        func_dir = tmp_path / "sub-s01" / "ses-01" / "func"
-        _write_sidecar(func_dir, "sub-s01", "ses-01", "stopSignal", "1",
+        _write_sidecar(tmp_path, "sub-s01", "ses-01", "stopSignal", "1",
                        expected=100, retained=49, fraction=0.51)
 
         entries = _scan_nonmonotonic_exclusions(tmp_path, NONMONOTONIC_EXCLUDE_FRACTION)
@@ -161,8 +160,7 @@ class TestNonmonotonicExclusionRule:
         assert entries == []
 
     def test_subject_filter_excludes_out_of_sample_subject(self, tmp_path):
-        func_dir = tmp_path / "sub-s99" / "ses-01" / "func"
-        _write_sidecar(func_dir, "sub-s99", "ses-01", "stopSignal", "1",
+        _write_sidecar(tmp_path, "sub-s99", "ses-01", "stopSignal", "1",
                        expected=10, retained=1, fraction=0.9)
 
         entries = _scan_nonmonotonic_exclusions(tmp_path, NONMONOTONIC_EXCLUDE_FRACTION,
@@ -172,8 +170,7 @@ class TestNonmonotonicExclusionRule:
     def test_custom_threshold_via_generator_cli_arg(self, tmp_path):
         """generate() reads args.nonmonotonic_exclude_fraction, not just the
         module default."""
-        func_dir = tmp_path / "sub-s01" / "ses-01" / "func"
-        _write_sidecar(func_dir, "sub-s01", "ses-01", "stopSignal", "1",
+        _write_sidecar(tmp_path, "sub-s01", "ses-01", "stopSignal", "1",
                        expected=10, retained=8, fraction=0.2)
 
         g = BehavioralGenerator()
@@ -184,8 +181,7 @@ class TestNonmonotonicExclusionRule:
         assert entries[0]["source"] == "behavioral-qc"
 
     def test_generate_wires_nonmonotonic_entries_through(self, tmp_path):
-        func_dir = tmp_path / "sub-s01" / "ses-01" / "func"
-        _write_sidecar(func_dir, "sub-s01", "ses-01", "stopSignal", "1",
+        _write_sidecar(tmp_path, "sub-s01", "ses-01", "stopSignal", "1",
                        expected=10, retained=2, fraction=0.8)
 
         g = BehavioralGenerator()
