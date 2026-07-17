@@ -27,7 +27,17 @@ from network_qa.qa_runs import flag_short_runs, scan_bold_volumes, format_report
 
 
 def _cmd_compile(args: argparse.Namespace) -> None:
-    lock = compile_exclusions(args.dataset, {}, args, generator_names=None)
+    # Generators that scan the dataset (short_run/behavioral/qa_decisions) read
+    # `dataset_config["bids_dir"]`; thread the optional --bids-dir through so a
+    # pass-1 `compile --generators short_run behavioral --bids-dir <cohort>`
+    # works pre-fMRIPrep. `--generators` (None => all registered) selects a
+    # subset; compile_exclusions already supports the names list.
+    dataset_config: dict = {}
+    if getattr(args, "bids_dir", None):
+        dataset_config["bids_dir"] = args.bids_dir
+    lock = compile_exclusions(
+        args.dataset, dataset_config, args, generator_names=args.generators
+    )
     write_lockfile(lock, args.out)
     n = len(lock.get("exclusions", []))
     print(f"Compiled {n} exclusions for '{args.dataset}' -> {args.out}")
@@ -73,6 +83,15 @@ def _build_parser() -> argparse.ArgumentParser:
     comp_p = sub.add_parser("compile", help="Run registered generators -> provenance lockfile")
     comp_p.add_argument("--dataset", required=True, help="Dataset name (e.g. discovery)")
     comp_p.add_argument("--out", required=True, help="Path to write the lockfile JSON")
+    comp_p.add_argument(
+        "--generators", nargs="+", default=None,
+        help="subset of registered generators to run; default all",
+    )
+    comp_p.add_argument(
+        "--bids-dir", default=None,
+        help="BIDS dataset root (needed by generators that scan the tree: "
+             "short_run / behavioral / qa_decisions)",
+    )
     for gen in list_generators().values():
         gen.add_cli_args(comp_p)
     comp_p.set_defaults(func=_cmd_compile)

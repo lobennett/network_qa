@@ -43,3 +43,19 @@ def test_motion_flags_rest_fd_and_task_prop(tmp_path):
     assert all(e["subject"] == "sub-s03" and e["session"] == "ses-05" for e in out)
     assert all(e["run"] == "run-1" for e in out)
     assert all(e["action"] == "exclude" and e["source"] == "motion" for e in out)
+
+
+def test_motion_no_ops_when_tsv_arg_is_none():
+    """`--motion-metrics-tsv` is non-required (all generators share one compile
+    subparser), so a subset compile without motion inputs leaves it None. The
+    generator must no-op (return []) rather than crash on Path(None)."""
+    gen = MotionGenerator()
+    args = Namespace(motion_metrics_tsv=None, fd_threshold=0.2,
+                     proportion_fd_threshold=0.2, proportion_dvars_threshold=0.2)
+    assert gen.generate("discovery", {}, args) == []
+
+
+def test_motion_no_ops_when_tsv_arg_missing():
+    """Even if the attribute is entirely absent from args, no crash, no entry."""
+    gen = MotionGenerator()
+    assert gen.generate("discovery", {}, Namespace()) == []

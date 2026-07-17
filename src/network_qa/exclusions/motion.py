@@ -17,8 +17,15 @@ class MotionGenerator:
     description = "Motion exclusions from motion_qa's motion_metrics.tsv (study FD/DVARS thresholds)"
 
     def add_cli_args(self, parser: ArgumentParser) -> None:
-        parser.add_argument("--motion-metrics-tsv", required=True,
-                            help="motion_qa motion_metrics.tsv for the cohort")
+        # Not argparse-required: every generator's args land on the same shared
+        # compile subparser, so a global required=True would break unrelated
+        # subset compiles (e.g. `--generators short_run behavioral`) that never
+        # supply a motion TSV. The runtime guard in generate() no-ops cleanly
+        # when this source isn't selected/supplied (matches lev1_outlier /
+        # qa_decisions, which are likewise non-required).
+        parser.add_argument("--motion-metrics-tsv", required=False, default=None,
+                            help="motion_qa motion_metrics.tsv for the cohort "
+                                 "(required when generators includes 'motion')")
         parser.add_argument("--fd-threshold", type=float, default=0.2,
                             help="rest FD-mean threshold (default 0.2)")
         parser.add_argument("--proportion-fd-threshold", type=float, default=0.2,
@@ -30,7 +37,11 @@ class MotionGenerator:
         if pd is None:
             print("Error: pandas required for motion generator")
             return []
-        tsv = Path(args.motion_metrics_tsv)
+        tsv_arg = getattr(args, "motion_metrics_tsv", None)
+        if not tsv_arg:
+            # No TSV supplied (subset compile that doesn't select motion) — no-op.
+            return []
+        tsv = Path(tsv_arg)
         if not tsv.is_file():
             print(f"No motion metrics TSV at {tsv}")
             return []
