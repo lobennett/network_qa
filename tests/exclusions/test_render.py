@@ -26,6 +26,36 @@ def test_render_scans_tsv_writes_why_per_session(tmp_path):
     assert "Resting FD mean" in txt
 
 
+def test_render_scans_tsv_multiecho_lists_real_files(tmp_path):
+    """Multi-echo scans must list the REAL echo filenames, not a bare
+    ``_bold.nii.gz`` (which fails bids-validator SCANS_FILENAME_NOT_MATCH_DATASET)."""
+    func = tmp_path / "sub-s03" / "ses-11" / "func"
+    func.mkdir(parents=True)
+    base = "sub-s03_ses-11_task-stopSignalWDirectedForgetting_run-1"
+    for echo in (1, 2, 3):
+        (func / f"{base}_echo-{echo}_bold.nii.gz").touch()
+    # a decoy run-10 file must NOT be matched by run-1
+    (func / "sub-s03_ses-11_task-stopSignalWDirectedForgetting_run-10_echo-1_bold.nii.gz").touch()
+    entries = [{"subject": "sub-s03", "session": "ses-11",
+                "task": "task-stopSignalWDirectedForgetting", "run": "run-1",
+                "reason": "non-monotonic", "source": "behavioral-qc"}]
+    render_scans_tsv(entries, tmp_path)
+    txt = (tmp_path / "sub-s03" / "ses-11" / "sub-s03_ses-11_scans.tsv").read_text()
+    for echo in (1, 2, 3):
+        assert f"func/{base}_echo-{echo}_bold.nii.gz" in txt
+    assert f"func/{base}_bold.nii.gz" not in txt          # no bare (echo-less) name
+    assert "run-10" not in txt                            # run-1 didn't swallow run-10
+
+
+def test_render_scans_tsv_falls_back_when_no_file(tmp_path):
+    """No matching file on disk -> still record the why under the constructed name."""
+    entries = [{"subject": "s03", "session": "05", "task": "task-rest", "run": "run-1",
+                "reason": "missing", "source": "behavioral-qc"}]
+    render_scans_tsv(entries, tmp_path)
+    txt = (tmp_path / "sub-s03" / "ses-05" / "sub-s03_ses-05_scans.tsv").read_text()
+    assert "func/sub-s03_ses-05_task-rest_run-1_bold.nii.gz" in txt
+
+
 def test_render_bidsignore_invalid_only(tmp_path):
     entries = [
         {"subject": "s03", "session": "05", "task": "task-rest", "run": "run-1",
