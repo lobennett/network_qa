@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "nibabel>=5",
     "pandas",
-    "network_events @ git+https://github.com/lobennett/network_events.git@3504f71",
+    "network_events @ git+https://github.com/lobennett/network_events.git@f7fd629",
 ]
 
 [project.scripts]
