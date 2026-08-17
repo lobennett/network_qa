@@ -22,7 +22,12 @@ from network_qa.exclusions import short_run  # noqa: F401
 
 from network_qa.exclusions.base import list_generators
 from network_qa.compile import compile_exclusions, write_lockfile, load_lockfile
-from network_qa.render import render_bids_filter, render_scans_tsv, render_bidsignore
+from network_qa.render import (
+    render_bids_filter,
+    render_bidsignore,
+    render_scans_tsv,
+    write_bids_filter_per_session,
+)
 from network_qa.qa_runs import flag_short_runs, scan_bold_volumes, format_report
 
 
@@ -50,6 +55,23 @@ def _cmd_render_bids_filter(args: argparse.Namespace) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, indent=2) + "\n")
     print(f"Wrote bids-filter-file -> {out_path}")
+
+
+def _cmd_render_bids_filter_per_session(args: argparse.Namespace) -> None:
+    cfg = {"anat_acquisition": args.anat_acquisition, "tasks": args.task}
+    entries = load_lockfile(args.lockfile)
+    written = write_bids_filter_per_session(
+        cfg,
+        entries,
+        args.bids_dir,
+        pipeline=args.pipeline,
+        out_dir=args.out_dir,
+        exclude_sources=tuple(args.exclude_source or ("short-run",)),
+    )
+    print(
+        f"Wrote {len(written)} per-session bids-filter file(s) for "
+        f"'{args.pipeline}' -> {args.out_dir}"
+    )
 
 
 def _cmd_render_scans_tsv(args: argparse.Namespace) -> None:
@@ -105,6 +127,25 @@ def _build_parser() -> argparse.ArgumentParser:
     bf_p.add_argument("--task", action="append", required=True, help="Task name (repeatable)")
     bf_p.add_argument("--out", required=True, help="Path to write the bids-filter-file JSON")
     bf_p.set_defaults(func=_cmd_render_bids_filter)
+
+    bfs_p = render_sub.add_parser(
+        "bids-filter-per-session",
+        help="One pybids filter per subject-session, dropping excluded scans (for BABS fan-out)",
+    )
+    bfs_p.add_argument("--anat-acquisition", required=True, help="Canonical anat acquisition label")
+    bfs_p.add_argument("--task", action="append", required=True, help="Task name (repeatable)")
+    bfs_p.add_argument("--lockfile", required=True, help="Compiled lockfile JSON")
+    bfs_p.add_argument("--bids-dir", required=True, help="BIDS dataset root")
+    bfs_p.add_argument("--pipeline", required=True, help="Pipeline name (goes in the filename)")
+    bfs_p.add_argument("--out-dir", required=True, help="Directory to write the filter files into")
+    bfs_p.add_argument(
+        "--exclude-source",
+        action="append",
+        default=None,
+        help="Exclusion source that withholds a scan from this pipeline "
+             "(repeatable; default: short-run)",
+    )
+    bfs_p.set_defaults(func=_cmd_render_bids_filter_per_session, exclude_source=None)
 
     st_p = render_sub.add_parser("scans-tsv", help="Per-session scans.tsv (filename + why)")
     st_p.add_argument("--lockfile", required=True, help="Compiled lockfile JSON")
