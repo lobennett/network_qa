@@ -115,3 +115,122 @@ def test_make_meta_strips_callable_from_args():
     assert meta["args"]["source"] == "motion"
     # full meta JSON-serializes without crashing
     json.dumps(meta)
+
+
+# --- code_sha resolution ------------------------------------------------------
+#
+# Production lockfiles were landing with `"code_sha": null` because the `select`
+# stage runs inside network_fmri.sif, where network_qa is a pip-installed package
+# with no `.git` directory -- so the git-only lookup had nothing to read. The
+# installed distribution does record the exact pinned commit in its dist-info
+# `direct_url.json` (a PEP 610 VCS install), so `code_sha()` falls back to that
+# before giving up. Resolution order: env override -> git HEAD -> dist-info.
+
+
+def test_code_sha_prefers_env_override(monkeypatch):
+    """An explicit NETWORK_QA_CODE_SHA wins over every other source: the caller
+    (orchestrator / container build) is asserting what code this is."""
+    from network_qa.exclusions import base
+
+    monkeypatch.setenv("NETWORK_QA_CODE_SHA", "deadbee")
+    monkeypatch.setattr(base, "_git_sha", lambda: "1111111")
+    monkeypatch.setattr(base, "_dist_sha", lambda: "2222222")
+
+    assert base.code_sha() == "deadbee"
+
+
+def test_code_sha_falls_back_to_git(monkeypatch):
+    """With no env override, a real git checkout reports its HEAD."""
+    from network_qa.exclusions import base
+
+    monkeypatch.delenv("NETWORK_QA_CODE_SHA", raising=False)
+    monkeypatch.setattr(base, "_git_sha", lambda: "abc1234")
+    monkeypatch.setattr(base, "_dist_sha", lambda: "2222222")
+
+    assert base.code_sha() == "abc1234"
+
+
+def test_code_sha_falls_back_to_dist_when_not_a_git_repo(monkeypatch):
+    """The container case: no .git, so the pinned commit comes from dist-info."""
+    from network_qa.exclusions import base
+
+    monkeypatch.delenv("NETWORK_QA_CODE_SHA", raising=False)
+    monkeypatch.setattr(base, "_git_sha", lambda: None)
+    monkeypatch.setattr(base, "_dist_sha", lambda: "494ab9d")
+
+    assert base.code_sha() == "494ab9d"
+
+
+def test_code_sha_none_when_nothing_resolves(monkeypatch):
+    """No env, no git, no dist metadata -> null, as before (never raises)."""
+    from network_qa.exclusions import base
+
+    monkeypatch.delenv("NETWORK_QA_CODE_SHA", raising=False)
+    monkeypatch.setattr(base, "_git_sha", lambda: None)
+    monkeypatch.setattr(base, "_dist_sha", lambda: None)
+
+    assert base.code_sha() is None
+
+
+def test_dist_sha_reads_pep610_commit_id(monkeypatch):
+    """_dist_sha shortens the dist-info direct_url.json commit to 7 chars."""
+    from network_qa.exclusions import base
+
+    class _FakeDist:
+        version = "0.1.0"
+
+        def read_text(self, name):
+            assert name == "direct_url.json"
+            return (
+                '{"url":"https://github.com/lobennett/network_qa.git",'
+                '"vcs_info":{"vcs":"git","commit_id":'
+                '"494ab9d035810b049ea9dbb200fcf8c34ad04a6b"}}'
+            )
+
+    monkeypatch.setattr(base, "_distribution", lambda name: _FakeDist())
+    assert base._dist_sha() == "494ab9d"
+
+
+def test_dist_sha_falls_back_to_version_for_non_vcs_install(monkeypatch):
+    """A plain (non-VCS) install has no commit, so report the version, tagged so
+    it can't be mistaken for a git sha."""
+    from network_qa.exclusions import base
+
+    class _FakeDist:
+        version = "0.1.0"
+
+        def read_text(self, name):
+            return None
+
+    monkeypatch.setattr(base, "_distribution", lambda name: _FakeDist())
+    assert base._dist_sha() == "dist:0.1.0"
+
+
+def test_dist_sha_none_when_package_not_installed(monkeypatch):
+    """Running from a source tree with no installed dist -> None, no exception."""
+    from network_qa.exclusions import base
+
+    def _boom(name):
+        raise base._PackageNotFoundError(name)
+
+    monkeypatch.setattr(base, "_distribution", _boom)
+    assert base._dist_sha() is None
+
+
+def test_compile_stamps_resolved_code_sha(monkeypatch):
+    """compile_exclusions puts the resolved sha in _meta (regression: it used to
+    call the git-only helper directly, yielding null inside the container).
+
+    Uses an unregistered generator name so no generator actually runs (an empty
+    list would mean "all generators" -- `names = generator_names or all`).
+    """
+    from argparse import Namespace
+
+    from network_qa import compile as compile_mod
+
+    monkeypatch.setattr(compile_mod, "code_sha", lambda: "494ab9d")
+    lock = compile_mod.compile_exclusions(
+        "discovery", {}, Namespace(), generator_names=["__no_such_generator__"]
+    )
+    assert lock["_meta"]["code_sha"] == "494ab9d"
+    assert lock["exclusions"] == []

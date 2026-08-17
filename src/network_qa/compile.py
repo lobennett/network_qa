@@ -16,7 +16,7 @@ from argparse import Namespace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from network_qa.exclusions.base import _git_sha, get_generator, list_generators
+from network_qa.exclusions.base import code_sha, get_generator, list_generators
 
 _KEY = ("subject", "session", "task", "run", "source")
 
@@ -39,7 +39,7 @@ def compile_exclusions(dataset_name, dataset_config, args, generator_names=None)
         "_meta": {
             "dataset": dataset_name,
             "compiled_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "code_sha": _git_sha(),
+            "code_sha": code_sha(),
             "generators": names,
             "n_exclusions": len(merged),
         },
