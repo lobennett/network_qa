@@ -43,7 +43,7 @@ wheels = [
 [[package]]
 name = "network-events"
 version = "0.1.0"
-source = { git = "https://github.com/lobennett/network_events.git?rev=aedfad1#aedfad188a9c4ca11e724e0bfca01dc3068d001b" }
+source = { git = "https://github.com/lobennett/network_events.git?rev=c5f653b#c5f653babe970c85614c57782766dc37277b0144" }
 dependencies = [
     { name = "nibabel" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -68,7 +68,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "network-events", git = "https://github.com/lobennett/network_events.git?rev=aedfad1" },
+    { name = "network-events", git = "https://github.com/lobennett/network_events.git?rev=c5f653b" },
     { name = "nibabel", specifier = ">=5" },
     { name = "pandas" },
 ]

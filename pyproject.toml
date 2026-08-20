@@ -14,7 +14,7 @@ dependencies = [
 dev = ["pytest>=8"]
 
 [tool.uv.sources]
-network_events = { git = "https://github.com/lobennett/network_events.git", rev = "aedfad1" }
+network_events = { git = "https://github.com/lobennett/network_events.git", rev = "c5f653b" }
 
 [project.scripts]
 network-qa = "network_qa.cli:main"
