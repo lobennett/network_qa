@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 from argparse import ArgumentParser, Namespace
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
+from importlib.metadata import distribution as _distribution
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -89,6 +93,55 @@ def _git_sha() -> str | None:
     return f"{sha}+dirty" if dirty else sha
 
 
+_ENV_CODE_SHA = "NETWORK_QA_CODE_SHA"
+
+
+def _dist_sha() -> str | None:
+    """Return the installed distribution's source commit, or its version.
+
+    A PEP 610 VCS install (`pip install git+https://...@<sha>`, which is how the
+    container pins network_qa) records the resolved commit in the dist-info
+    `direct_url.json`, so the exact SHA survives even with no `.git` around.
+    A plain install has no commit — fall back to the version, tagged `dist:` so
+    it can't be misread as a git SHA. None if network_qa isn't installed.
+    """
+    try:
+        dist = _distribution("network_qa")
+    except _PackageNotFoundError:
+        return None
+    raw = dist.read_text("direct_url.json")
+    if raw:
+        try:
+            commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id")
+        except json.JSONDecodeError:
+            commit = None
+        if commit:
+            return commit[:7]
+    version = getattr(dist, "version", None)
+    return f"dist:{version}" if version else None
+
+
+def code_sha() -> str | None:
+    """The code identity to stamp into provenance metadata.
+
+    Resolution order:
+
+    1. ``$NETWORK_QA_CODE_SHA`` — an explicit assertion by the caller
+       (orchestrator or container build) wins over anything inferred.
+    2. git HEAD of this checkout (``+dirty`` when the tree has local edits).
+    3. the installed distribution's pinned commit / version (:func:`_dist_sha`).
+
+    Step 3 is what makes production lockfiles non-null: the ``select`` stage runs
+    inside ``network_fmri.sif``, where network_qa is a pip-installed package with
+    no ``.git`` — git-only lookup returned None there, so every lockfile written
+    by the pipeline recorded ``"code_sha": null``.
+    """
+    env = os.environ.get(_ENV_CODE_SHA, "").strip()
+    if env:
+        return env
+    return _git_sha() or _dist_sha()
+
+
 def _jsonify(value):
     """Convert non-JSON-native values to JSON-safe forms.
 
@@ -141,7 +194,7 @@ def make_meta(
     return {
         "generator": generator_name,
         "ran_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "code_sha": _git_sha(),
+        "code_sha": code_sha(),
         "args": _jsonify(args_dict) if args_dict is not None else None,
         "n_entries": n_entries,
     }

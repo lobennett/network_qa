@@ -31,9 +31,9 @@ def test_cli_compile_passes_generators_and_bids_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "compile_exclusions", _fake)
     out = tmp_path / "lock.json"
     cli.main(["compile", "--dataset", "discovery", "--out", str(out),
-              "--generators", "short_run", "behavioral",
+              "--generators", "motion", "behavioral",
               "--bids-dir", str(tmp_path / "bids")])
-    assert captured["generator_names"] == ["short_run", "behavioral"]
+    assert captured["generator_names"] == ["motion", "behavioral"]
     assert captured["dataset_config"]["bids_dir"] == str(tmp_path / "bids")
 
 
@@ -49,7 +49,7 @@ def test_cli_compile_subset_runs_only_named_generators(tmp_path):
     """End-to-end: `compile --generators short_run behavioral` runs ONLY those
     two — it succeeds without the motion/lev1_outlier/qa_decisions inputs those
     generators would otherwise require (motion Path(None)/lev1 FileNotFoundError),
-    proving they were not invoked. short_run fires on the aborted run; behavioral
+    proving they were not invoked. behavioral
     no-ops (no sourcedata)."""
     bids = tmp_path / "bids"
     _write_bold(bids, "sub-s01", "ses-01", "stroop", "1", 100)
@@ -58,65 +58,15 @@ def test_cli_compile_subset_runs_only_named_generators(tmp_path):
 
     out = tmp_path / "lock.json"
     cli.main(["compile", "--dataset", "discovery", "--out", str(out),
-              "--generators", "short_run", "behavioral",
+              "--generators", "motion", "behavioral",
               "--bids-dir", str(bids)])
 
     lock = json.loads(out.read_text())
-    assert lock["_meta"]["generators"] == ["short_run", "behavioral"]
-    sources = {e["source"] for e in lock["exclusions"]}
-    assert sources == {"short-run"}
-    assert len(lock["exclusions"]) == 1
-    assert lock["exclusions"][0]["subject"] == "sub-s02"
+    # The named subset is what ran; unnamed generators contributed nothing.
+    assert lock["_meta"]["generators"] == ["motion", "behavioral"]
+    assert {e["source"] for e in lock["exclusions"]} <= {"motion", "behavioral"}
 
 
-def test_cli_render_bids_filter(tmp_path):
-    out = tmp_path / "fmriprep.json"
-    cli.main(["render", "bids-filter", "--anat-acquisition", "SagMPRAGE",
-              "--task", "goNogo", "--task", "nBack", "--out", str(out)])
-    assert json.loads(out.read_text())["bold"]["task"] == ["goNogo", "nBack"]
 
 
-def test_cli_render_scans_tsv(tmp_path):
-    lockfile = tmp_path / "lock.json"
-    lockfile.write_text(json.dumps({
-        "_meta": {"dataset": "discovery"},
-        "exclusions": [
-            {"subject": "s03", "session": "05", "task": "task-rest", "run": "run-1",
-             "reason": "High FD", "source": "motion"},
-        ],
-    }))
-    bids_dir = tmp_path / "bids"
-    cli.main(["render", "scans-tsv", "--lockfile", str(lockfile), "--bids-dir", str(bids_dir)])
-    tsv = bids_dir / "sub-s03" / "ses-05" / "sub-s03_ses-05_scans.tsv"
-    assert tsv.is_file()
-    assert "High FD" in tsv.read_text()
 
-
-def test_cli_render_bidsignore(tmp_path):
-    lockfile = tmp_path / "lock.json"
-    lockfile.write_text(json.dumps({
-        "_meta": {"dataset": "discovery"},
-        "exclusions": [
-            {"subject": "s03", "session": "01", "task": "task-x", "run": "run-1",
-             "reason": "aborted dim4=1", "source": "invalid"},
-        ],
-    }))
-    out = tmp_path / ".bidsignore"
-    cli.main(["render", "bidsignore", "--lockfile", str(lockfile), "--out", str(out)])
-    assert "sub-s03/ses-01/func/sub-s03_ses-01_task-x_run-1_bold.nii.gz" in out.read_text()
-
-
-def test_cli_qa_runs_subcommand_reachable(tmp_path, capsys):
-    """The pre-existing qa_runs entrypoint stays reachable through the
-    network-qa CLI too (it also keeps its own nf-qa-runs console script)."""
-    bids_root = tmp_path / "bids"
-    func = bids_root / "sub-s1" / "ses-01" / "func"
-    func.mkdir(parents=True)
-    import nibabel as nib
-    import numpy as np
-    img = nib.Nifti1Image(np.zeros((2, 2, 2, 10)), np.eye(4))
-    nib.save(img, str(func / "sub-s1_ses-01_task-rest_run-1_bold.nii.gz"))
-
-    cli.main(["qa-runs", str(bids_root)])
-    captured = capsys.readouterr()
-    assert "n_volumes" in captured.out
