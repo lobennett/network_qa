@@ -1,17 +1,14 @@
-"""Behavioral exclusion generator — runs behavioral QC and produces exclusion entries.
+"""Behavioral exclusions from `network_events`' trial-retention metric.
 
-Also applies the monolith's non-monotonic-onset-truncation exclusion rule (see
-`_scan_nonmonotonic_exclusions`): `network_events` truncates a run at the first
-backward-clock ExpFactory glitch and writes the resulting trial-retention
-metric as a truncation-QC sidecar at
-`sourcedata/events_qc/<sub>/<ses>/<sub>_<ses>_task-<task>_run-<run>_desc-truncation.json`
-(`NTestTrialsExpected` / `NTestTrialsRetained` / `FractionTestTrialsDropped`);
-`network_events` makes no exclusion decision from that number. The sidecar lives
-under `sourcedata/` with a non-reserved `_desc-truncation` name (not as an
-`_events.json` in `func/`, which BIDS reserves for events-column descriptions
-and bids-validator would reject). This generator reads those sidecars and
-excludes any run whose dropped fraction exceeds `nonmonotonic_exclude_fraction`
-— the decision half of that split.
+`network_events` truncates a run twice -- at a backward-clock ExpFactory glitch, and at the
+end of the acquired scan -- and records what each cost in a sidecar at
+`sourcedata/events_qc/<sub>/<ses>/<sub>_<ses>_task-<T>_run-<N>_desc-truncation.json`. It makes
+no exclusion decision from those numbers; this generator is the decision half, excluding any
+run whose dropped fraction exceeds `nonmonotonic_exclude_fraction`.
+
+NOT IMPLEMENTED: the accuracy / RT / omission criteria the monolith also applied. Those lived
+in `network_events.qc`, which was removed; the per-task thresholds survive only as
+`network_events.qc_globals`. Restoring them means reimplementing the computation.
 """
 from __future__ import annotations
 
@@ -94,58 +91,25 @@ def _scan_nonmonotonic_exclusions(
 
 class BehavioralGenerator:
     name = "behavioral"
-    description = (
-        "Generate exclusions from behavioral QC (accuracy, RT, omission thresholds) "
-        "+ non-monotonic-truncation trial-retention"
-    )
+    description = "Exclude runs whose events truncation dropped too many test trials"
 
     def add_cli_args(self, parser: ArgumentParser) -> None:
-        parser.add_argument(
-            "--behavioral-dir",
-            required=False,
-            default=None,
-            help="Path to sourcedata behavioral directory (default: {bids_dir}/sourcedata)",
-        )
         parser.add_argument(
             "--nonmonotonic-exclude-fraction",
             type=float,
             default=NONMONOTONIC_EXCLUDE_FRACTION,
-            help=(
-                "Exclude a run if network_events' truncation-QC sidecar "
-                "(sourcedata/events_qc/.../_desc-truncation.json) reports "
-                "FractionTestTrialsDropped strictly greater than this "
-                f"(default {NONMONOTONIC_EXCLUDE_FRACTION})."
-            ),
+            help=("exclude a run whose truncation sidecar reports "
+                  "FractionTestTrialsDropped strictly greater than this "
+                  f"(default {NONMONOTONIC_EXCLUDE_FRACTION})"),
         )
 
     def generate(self, dataset_name: str, dataset_config: dict, args: Namespace) -> list[dict]:
         bids_dir = Path(dataset_config["bids_dir"])
-        behavioral_dir = Path(args.behavioral_dir) if getattr(args, "behavioral_dir", None) else bids_dir / "sourcedata"
-
-        try:
-            from network_events.qc import run_qc
-        except ImportError:
-            print("Error: pandas required for behavioral generator. Install with: uv pip install -e '.[events]'")
-            exclusion_entries, trim_entries = [], []
-        else:
-            exclusion_entries, trim_entries = run_qc(
-                behavioral_dir=behavioral_dir,
-                bids_dir=bids_dir,
-            )
-            # Source field is set by the exclusions system when saving, but include for clarity
-            for entry in exclusion_entries:
-                entry["source"] = "behavioral-qc"
-
         threshold = getattr(args, "nonmonotonic_exclude_fraction", NONMONOTONIC_EXCLUDE_FRACTION)
-        subjects = load_dataset_subjects(dataset_config)
-        nonmonotonic_entries = _scan_nonmonotonic_exclusions(bids_dir, threshold, subjects)
-        exclusion_entries.extend(nonmonotonic_entries)
-
-        print(
-            f"Behavioral QC: {len(exclusion_entries)} exclusions, {len(trim_entries)} trim entries "
-            f"({len(nonmonotonic_entries)} non-monotonic-truncation)"
-        )
-        return exclusion_entries
+        entries = _scan_nonmonotonic_exclusions(
+            bids_dir, threshold, load_dataset_subjects(dataset_config))
+        print(f"Behavioral: {len(entries)} exclusions (trial retention < {1 - threshold:.0%})")
+        return entries
 
 
 register_generator(BehavioralGenerator())

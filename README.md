@@ -1,94 +1,67 @@
 # network_qa
 
-Quality-assurance metrics and decisions for the **r01network** neuroimaging
-pipeline. A small, pure, reusable package that other repos import — chiefly the
-`network_fmri` orchestrator, which wires QA verdicts into its data-selection layer
-(`bids-filter-file` + `scans.tsv`). Kept free of Flywheel / orchestration so it
-stays testable and reusable.
+Compiles the r01network study's exclusions into one provenance-stamped lockfile. Pure and
+orchestration-free: it reads evidence other stages produced and decides what to exclude, but never
+runs a pipeline or touches Flywheel.
 
-## What's here
+Normally invoked through `network_fmri qa-motion` / `qa-lev1`, which pin this package at a commit.
 
-| module | role |
-|--------|------|
-| `qa_runs` | flag short functional runs by per-task cohort-mean volume count (`flag_short_runs` is pure + unit-tested; `scan_bold_volumes` reads NIfTI headers) → CLI `nf-qa-runs` (also reachable as `network-qa qa-runs`) |
-| `exclusions.base` | generator registry (`register_generator`/`get_generator`/`list_generators`) + provenance helpers (`make_meta`, `_git_sha`) |
-| `exclusions.behavioral` | wraps `network_events.qc.run_qc` (accuracy/RT/omission thresholds) as a generator; also reads the `_events.json` sidecar `network_events` writes next to each `_events.tsv` and excludes any run whose `FractionTestTrialsDropped` (from non-monotonic-onset truncation) is `> nonmonotonic_exclude_fraction` (default 0.5, matching the monolith's `NONMONOTONIC_EXCLUDE_FRACTION`) |
-| `exclusions.motion` | reads `motion_qa`'s `motion_metrics.tsv`, applies study FD/DVARS thresholds |
-| `exclusions.lev1_outlier` | auto-excludes scans flagged by cohort lev1 QC (vif/outlier-pct rules); dormant until `network_glm` produces its input CSV |
-| `exclusions.qa_decisions` | expands a manually-reviewed decisions TSV (`decisions.py`) into per-scan exclusions |
-| `compile` | runs the registered generators, merges + dedupes, and writes a provenance-stamped lockfile |
-| `render` | turns a compiled lockfile into the 3 data-selection channels: bids-filter-file, scans.tsv, .bidsignore |
+## Where it sits
 
-**`nf-qa-runs`** — scan a BIDS tree, compute each task's mean volume count across
-the whole cohort, and flag any run under a fraction (default 0.5) of that mean:
+Nothing is filtered before preprocessing — the full BIDS tree goes through fMRIPrep and MRIQC, and
+exclusion happens at the point of use. So there are two compiles, each downstream of the step that
+produces its evidence:
+
+| Compile | Runs after | Generators | Gates |
+|---|---|---|---|
+| `qa-motion` | fMRIPrep | `motion`, `behavioral` | what enters lev1 |
+| `qa-lev1` | `glm-outliers` | `motion`, `behavioral`, `lev1_outlier` | what enters lev2 |
 
 ```bash
-nf-qa-runs /path/to/bids                 # TSV report to stdout
-nf-qa-runs /path/to/bids --frac 0.5 --out qa_runs.tsv
+network-qa compile --dataset discovery --generators motion behavioral \
+    --bids-dir <bids> --out lock.json --motion-metrics-tsv <motion_metrics.tsv>
 ```
 
-Clear aborts fall out; two near-complete runs of a task both survive. Output feeds
-the processing-selection layer; a human can override.
+`glm-lev1 --exclusions-file lock.json` reads the result. The lockfile carries the package commit
+and each entry's source and reason, so a model's exclusion set is traceable to the evidence.
 
-## Exclusions integrator
+## Generators
 
-`network_qa` is the study's exclusion **integrator**: it runs the registered
-exclusion generators, compiles their output into one provenance-stamped
-lockfile, and renders that lockfile into the three data-selection channels an
-orchestrator (`network_fmri`) needs.
+| Generator | Reads | Excludes a run when |
+|---|---|---|
+| `motion` | fMRIPrep's `motion_metrics.tsv` | FD/DVARS exceed the study thresholds |
+| `behavioral` | `network_events`' `_desc-truncation.json` sidecars | truncation dropped more than half its test trials |
+| `lev1_outlier` | `network_glm`'s `lev1_outliers.csv` | VIF or outlier-percentage rules flag it |
+| `qa_decisions` | a hand-reviewed decisions TSV | a human said so |
+
+`behavioral` is the decision half of a deliberate split: `network_events` truncates a run — at a
+backward-clock glitch, or at the end of an aborted scan — and records what that cost, but makes no
+exclusion decision. This is where the threshold is applied.
+
+**Not implemented:** the accuracy / RT / omission criteria the monolith also applied. They lived in
+`network_events.qc`, which was removed; the per-task thresholds survive as
+`network_events.qc_globals` but the computation would need rewriting.
+
+## Layout
+
+```
+src/network_qa/
+  cli.py                    one subcommand: compile
+  compile.py                run the generators, merge, dedupe, stamp provenance
+  decisions.py              parse a hand-reviewed decisions TSV
+  exclusions/base.py        generator registry + provenance helpers
+  exclusions/motion.py      FD/DVARS
+  exclusions/behavioral.py  trial retention after truncation
+  exclusions/lev1_outlier.py  VIF / outlier percentage
+  exclusions/qa_decisions.py  manual overrides
+```
+
+## Setup
 
 ```bash
-# 1. Compile every registered generator's output into a lockfile.
-#    (each generator's CLI flags are attached to this same subcommand --
-#    e.g. --motion-metrics-tsv, --decisions-tsv, --lev1-outliers-csv)
-network-qa compile --dataset discovery --out lock.json \
-    --motion-metrics-tsv /path/to/motion_metrics.tsv \
-    --decisions-tsv config/manifests/qc_decisions.tsv
-
-# 2. Render the 3 channels from that lockfile.
-network-qa render bids-filter --anat-acquisition SagMPRAGE \
-    --task goNogo --task nBack --task stroop --out fmriprep_filter.json
-
-network-qa render scans-tsv --lockfile lock.json --bids-dir /path/to/bids
-
-network-qa render bidsignore --lockfile lock.json --out /path/to/bids/.bidsignore
+uv sync
+uv run pytest -q
 ```
 
-`bids-filter-file` is coarse and config-driven (canonical anat acquisition +
-the task set a pipeline runs) — pybids filters can't express per-scan quality
-exclusions, so those are NOT in it. `scans.tsv` carries the per-scan "why".
-`.bidsignore` holds only genuinely-invalid scans (`source == "invalid"`);
-everything else that's excluded for quality reasons is enforced downstream,
-at lev1, by reading the lockfile directly.
-
-**Truncation vs. decision split**: `network_events` detects the non-monotonic-onset
-ExpFactory clock glitch, truncates the run's events at that point, and writes the
-resulting trial-retention counts as a machine-readable `_events.json` sidecar
-(`NTestTrialsExpected` / `NTestTrialsRetained` / `FractionTestTrialsDropped`) — it
-makes no exclusion decision. `exclusions.behavioral` is where that decision is
-made: a run whose dropped fraction exceeds the threshold is excluded
-(`source="behavioral-qc"`, `reason` cites the dropped/expected counts).
-
-The operational compile against real cohorts is gated on upstream inputs that
-don't exist yet: `motion` needs fMRIPrep run on `discovery_v2`, and
-`lev1_outlier` needs `network_glm`'s lev1 QC output. This package builds and
-unit-tests the compile/render machinery on synthetic data; wiring
-`network_fmri` to invoke it, and running it for real, are follow-ups.
-
-## Roadmap (consolidation)
-
-This package is intended to absorb the QA scattered elsewhere so there's one QA
-surface for the orchestrator to import: FreeSurfer metrics, output-presence
-checks, and the reliability-movie generation (the standalone
-`bold-reliability-movies`).
-
-## Setup (Sherlock)
-
-`$HOME` is quota'd — keep the venv/cache on `$SCRATCH`:
-
-```bash
-module load uv
-export UV_PROJECT_ENVIRONMENT=$SCRATCH/network_qa_venv
-export UV_CACHE_DIR=$SCRATCH/uv_cache
-uv sync && uv run pytest
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md). Keep the venv and cache off `$HOME`:
+`export UV_PROJECT_ENVIRONMENT=$SCRATCH/venvs/network_qa UV_CACHE_DIR=$SCRATCH/.uv`.
