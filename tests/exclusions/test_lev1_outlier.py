@@ -1,13 +1,7 @@
-"""Tests for network_qa.exclusions.lev1_outlier — ported from
-neuro_workflow/tests/exclusions/test_lev1_outlier.py, import-repointed.
+"""Tests for network_qa.exclusions.lev1_outlier.
 
-Adapted: `test_generator_output_flows_through_compile` originally drove
-neuro_workflow's `core.exclusions` sources-dir/EXCLUSIONS_DIR persistence
-layer (save_source_entries -> compile_exclusions reading from disk). That
-layer doesn't exist in network_qa (Task 6's compile.py runs generators
-in-memory), so the test is rewritten to exercise `network_qa.compile`'s
-`compile_exclusions(...)` directly against a registered generator instance,
-preserving the original intent: "generator output flows through compile."
+`test_generator_output_flows_through_compile` drives `compile_exclusions` directly against
+a registered generator instance, since there is no on-disk sources layer to route through.
 """
 from __future__ import annotations
 

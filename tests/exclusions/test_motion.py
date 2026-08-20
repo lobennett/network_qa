@@ -1,10 +1,10 @@
-"""Tests for network_qa.exclusions.motion — behavior change from the monolith.
+"""Tests for network_qa.exclusions.motion — behavior change from the previous pipeline.
 
-The monolith's `motion` generator (neuro_workflow/.../exclusions/motion.py)
+The previous pipeline's `motion` generator (the previous pipeline)
 recomputed FD/DVARS from fmriprep confound TSVs directly. In the modular
 pipeline, `motion_qa` already computes those into a `motion_metrics.tsv`; this
 generator reads that TSV and applies the same study thresholds (preserving
-the monolith's threshold logic at exclusions/motion.py lines ~95-127 and its
+the previous pipeline's threshold logic at exclusions/motion.py lines ~95-127 and its
 output dict shape: subject/session/task/run/source/action/reason[/metrics]).
 """
 from argparse import Namespace
@@ -36,7 +36,7 @@ def test_motion_flags_rest_fd_and_task_prop(tmp_path):
     out = gen.generate("discovery", {}, args)
     keys = {(e["subject"], e["task"]) for e in out}
     # All four generators emit BIDS-prefixed entities (sub-/ses-/task-/run-),
-    # matching the monolith + what is_excluded/lev1 query with. motion_qa's TSV
+    # matching the previous pipeline + what is_excluded/lev1 query with. motion_qa's TSV
     # stores bare subject/session, so the generator must add the sub-/ses-
     # prefixes at the source (task/run get task-/run- prefixes too).
     assert keys == {("sub-s03", "task-rest"), ("sub-s03", "task-stroop")}   # nback passes

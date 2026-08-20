@@ -1,12 +1,7 @@
-"""Tests for network_qa.exclusions.qa_decisions — ported from
-neuro_workflow/tests/exclusions/test_qa_decisions.py, import-repointed.
+"""Tests for network_qa.exclusions.qa_decisions — expanding a reviewed decisions TSV.
 
-Adapted: the original `test_generator_output_flows_through_compile` drove
-neuro_workflow's `core.exclusions` sources-dir/EXCLUSIONS_DIR persistence
-layer. That layer doesn't exist in network_qa; the equivalent
-generator-output-flows-through-compile integration coverage lives in
-tests/exclusions/test_compile.py (Task 6), which exercises the real
-qa_decisions generator through network_qa.compile.compile_exclusions.
+Integration coverage for generator output reaching a lockfile lives in
+tests/exclusions/test_compile.py, which drives this generator through compile_exclusions.
 """
 from __future__ import annotations
 

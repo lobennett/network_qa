@@ -1,5 +1,5 @@
 """Tests for network_qa.decisions — ported verbatim (import-repoint only) from
-neuro_workflow/tests/qa/test_decisions.py."""
+the previous pipeline"""
 from network_qa.decisions import Decision, ScanKey, load_decisions
 
 

@@ -1,8 +1,4 @@
-"""Tests for network_qa.exclusions.behavioral — ported from
-neuro_workflow/tests/exclusions/test_behavioral.py and
-neuro_workflow/tests/events/test_behavioral_exclusion_generator.py
-(two separate monolith test files covering the same generator),
-import-repointed."""
+"""Tests for network_qa.exclusions.behavioral — the trial-retention exclusion rule."""
 import json
 from argparse import Namespace
 
@@ -88,7 +84,7 @@ def _write_sidecar(bids_dir: Path, subject: str, session: str, task: str, run: s
 
 
 class TestNonmonotonicExclusionRule:
-    """The >50%-test-trials-dropped policy ported from neuro_workflow.events.qc
+    """The >50%-test-trials-dropped policy ported from the previous pipeline
     (NONMONOTONIC_EXCLUDE_FRACTION = 0.5, strict `>` comparison). This is the
     decision half of the truncation/decision split: network_events computes +
     writes the sourcedata/events_qc/.../_desc-truncation.json sidecar
@@ -132,7 +128,7 @@ class TestNonmonotonicExclusionRule:
         assert entries == []
 
     def test_threshold_boundary_exactly_half_is_kept(self, tmp_path):
-        """The monolith uses strict `>` (events/qc.py:
+        """The previous pipeline uses strict `>` (events/qc.py:
         `tstats["fraction_test_dropped"] > NONMONOTONIC_EXCLUDE_FRACTION`) --
         a run dropping EXACTLY the threshold fraction is NOT excluded."""
         _write_sidecar(tmp_path, "sub-s01", "ses-01", "stopSignal", "1",

@@ -1,13 +1,9 @@
 """Compile registered exclusion generators into one provenance-stamped lockfile.
 
-network_qa's compile is a leaner, in-memory reimplementation of the monolith
-pipeline's `core/exclusions.py` compile step: generators run directly (no sources/*.json
-disk cache, no manual force-include/force-exclude overrides file -- that
-persistence + override layer isn't part of this plan's scope). The output is
-a single self-contained lockfile `{"_meta": ..., "exclusions": [...]}` rather
-than the monolith's two-file split (a meta-only `<dataset>_lock.json` pointing
-at a separate bare-list `compiled_exclusions.json`). See
-tests/exclusions/test_compile.py for the full rationale + verification notes.
+Generators run in memory and their output merges into a single self-contained
+`{"_meta": ..., "exclusions": [...]}` file. There is no on-disk per-source cache and no
+force-include/force-exclude override layer: a compile is cheap enough to just re-run, and
+manual overrides go through the `qa_decisions` generator instead.
 """
 from __future__ import annotations
 
@@ -68,16 +64,11 @@ def is_excluded(subject: str, session: str, task: str, run: str,
                 exclusions: list[dict]) -> bool:
     """Return True if the given scan is excluded in the compiled exclusions list.
 
-    Consumer-side query helper for network_glm/lev1 (pass an already-loaded
-    exclusions list, e.g. from `load_lockfile`). Matches the monolith's
-    core/exclusions.py::is_excluded exactly: an EXACT tuple match on
-    (subject, session, task, run) against each entry, considering only entries
-    whose action is in {"exclude", "trim"}. No entity normalization — the
-    lockfile stores BIDS-prefixed entities and the caller queries with the same
-    prefixed form (normalization is the caller's responsibility).
-
-    Uses `e.get("action")` (a defensive superset of the monolith's `e["action"]`)
-    so an entry missing the field is skipped rather than raising KeyError.
+    Consumer-side query helper for network_glm/lev1 (pass an already-loaded exclusions
+    list, e.g. from `load_lockfile`). Exact tuple match on (subject, session, task, run),
+    considering only entries whose action is in {"exclude", "trim"}. No entity
+    normalization: the lockfile stores BIDS-prefixed entities and the caller must query
+    with the same prefixed form. An entry missing `action` is skipped, not an error.
     """
     key = (subject, session, task, run)
     return any(

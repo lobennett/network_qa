@@ -1,30 +1,11 @@
-"""Tests for network_qa.compile — run registered generators -> merge/dedupe ->
-provenance-stamped lockfile.
+"""Tests for network_qa.compile — generators -> merge/dedupe -> provenance-stamped lockfile.
 
-Lockfile shape verified against neuro_workflow's `core/exclusions.py` (the
-downstream reader for the OLD monolith). That module actually splits the
-concept across two files: a meta-only `data/exclusions/<ds>_lock.json`
-(dataset/compiled_at/compiled_at_code_sha/compiled_path/n_total_entries/
-n_overrides/sources -- no embedded entries) that POINTS AT a separate
-bare-list `compiled_exclusions.json` holding the real per-scan entries
-(read by `load_compiled_exclusions` / consumed by lev1's `--exclusions-file`).
-There is no single self-contained `{_meta, exclusions}` file in the monolith.
+The lockfile is one self-contained `{"_meta": ..., "exclusions": [...]}` file.
+`load_lockfile` also accepts a bare list, so a consumer (network_glm) can read either shape
+without knowing which was written.
 
-network_qa consolidates this into ONE self-contained wrapped lockfile
-(`{"_meta": ..., "exclusions": [...]}`) since there's no disk-based
-sources/overrides layer here (Task 6 runs generators in-memory). This keeps
-the same *read contract* the monolith already uses elsewhere (its own
-`_read_source_file` tolerates both a wrapped `{_meta, entries}` shape and a
-bare list) -- `load_lockfile` here mirrors that tolerance for `{_meta,
-exclusions}` vs. bare list, so any future consumer (network_glm) can read
-either shape without knowing which one was written.
-
-The dedup key (subject, session, task, run, source) is a network_qa-native
-safety net not present in the monolith (which never dedupes -- it just
-concatenates every sources/*.json). It's non-breaking: the monolith's own
-`is_excluded`/`get_trim_info` only care about (subject, session, task, run)
-having *any* matching exclude/trim entry, and duplicate identical entries
-from the same generator have never been a real production requirement.
+The dedup key is (subject, session, task, run, source) — a safety net, since `is_excluded`
+only cares whether *any* matching exclude/trim entry exists.
 """
 from argparse import Namespace
 from network_qa import compile as nqc
@@ -91,8 +72,7 @@ def test_load_lockfile_accepts_wrapped_format(tmp_path):
 
 
 def test_load_lockfile_accepts_bare_list_back_compat(tmp_path):
-    """A bare list (no _meta wrapper) is also readable -- mirrors the
-    monolith's own tolerant `_read_source_file` behavior."""
+    """A bare list (no _meta wrapper) is also readable."""
     import json
     bare = [
         {"subject": "s10", "session": "02", "task": "task-cuedTS", "run": "run-1",
@@ -105,9 +85,7 @@ def test_load_lockfile_accepts_bare_list_back_compat(tmp_path):
 
 
 def test_compile_with_qa_decisions_generator_flows_through(tmp_path):
-    """Integration coverage for the real qa_decisions generator (the monolith
-    test this replaces originally drove neuro_workflow's core.exclusions
-    disk-persistence layer; network_qa's compile is in-memory)."""
+    """Integration coverage: the real qa_decisions generator through compile."""
     import csv
     from network_qa.exclusions.qa_decisions import QADecisionsGenerator
 

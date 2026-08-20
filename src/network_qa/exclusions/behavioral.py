@@ -6,7 +6,7 @@ end of the acquired scan -- and records what each cost in a sidecar at
 no exclusion decision from those numbers; this generator is the decision half, excluding any
 run whose dropped fraction exceeds `nonmonotonic_exclude_fraction`.
 
-NOT IMPLEMENTED: the accuracy / RT / omission criteria the monolith also applied. Those lived
+NOT IMPLEMENTED: the accuracy / RT / omission criteria this study previously applied. Those lived
 in `network_events.qc`, which was removed; the per-task thresholds survive only as
 `network_events.qc_globals`. Restoring them means reimplementing the computation.
 """
@@ -20,7 +20,7 @@ from pathlib import Path
 
 from network_qa.exclusions.base import load_dataset_subjects, register_generator
 
-# Matches neuro_workflow.events.qc.NONMONOTONIC_EXCLUDE_FRACTION exactly.
+# A run losing more than half its test trials to truncation is excluded.
 NONMONOTONIC_EXCLUDE_FRACTION = 0.5
 
 _TRUNCATION_JSON_RE = re.compile(
@@ -30,7 +30,7 @@ _TRUNCATION_JSON_RE = re.compile(
 
 @dataclass(frozen=True)
 class Thresholds:
-    """Behavioral-generator thresholds. Defaults match the monolith."""
+    """Behavioral-generator thresholds."""
     nonmonotonic_exclude_fraction: float = NONMONOTONIC_EXCLUDE_FRACTION
 
 
@@ -41,13 +41,9 @@ def _scan_nonmonotonic_exclusions(
     network_events writes and emit one exclusion entry per run whose
     `FractionTestTrialsDropped` exceeds `threshold`.
 
-    Matches neuro_workflow.events.qc.run_qc's non-monotonic-truncation rule
-    exactly: strict `>` comparison (a run dropping EXACTLY the threshold
-    fraction is kept, not excluded), source="behavioral-qc", action="exclude".
-    A missing/unreadable sidecar (run whose events were never generated, or an
-    events package predating this metric) is treated as 0 dropped -- no
-    crash, no entry. One sidecar = one run, so no further aggregation is
-    needed: this already emits one entry per (subject, session, task, run).
+    Strict `>`, so a run dropping exactly the threshold fraction is kept. A missing or
+    unreadable sidecar counts as 0 dropped rather than raising -- that covers runs whose
+    events were never generated. One sidecar is one run, so no aggregation is needed.
     """
     entries: list[dict] = []
     for sidecar in sorted(bids_dir.glob("sourcedata/events_qc/sub-*/ses-*/*_desc-truncation.json")):

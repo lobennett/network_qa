@@ -1,18 +1,9 @@
-"""Tests for network_qa.exclusions.base — registry + provenance.
+"""Tests for network_qa.exclusions.base — the generator registry and provenance stamp.
 
-Ported from neuro_workflow/tests/exclusions/test_base.py (register/get/list
-generators, portable as-is) and neuro_workflow/tests/exclusions/test_provenance.py
-(make_meta / _jsonify / _git_sha unit tests, portable as-is).
-
-NOT ported: test_provenance.py's disk-persistence tests (save_source_entries,
-load_source_entries, compile_exclusions with EXCLUSIONS_DIR/LOCKFILE_DIR) and
-all of neuro_workflow/tests/core/test_exclusions.py (validate_entry,
-save/load_source_entries, save/load_overrides, is_excluded, get_trim_info).
-Those exercise neuro_workflow's `core.exclusions` sources-dir + manual-override
-persistence layer, which network_qa's simplified design (Task 6: generators run
-in-memory, merged directly by `compile.py`) does not replicate — there is no
-`network_qa.core.exclusions` module. See tests/exclusions/test_compile.py for
-the in-memory analogue of the compile/lockfile behavior.
+There is no disk-persistence layer to test: generators run in memory and `compile.py`
+merges them directly, so there is no sources-dir, no overrides file, and no
+`network_qa.core.exclusions`. tests/exclusions/test_compile.py covers the compile and
+lockfile behaviour that replaces it.
 """
 from argparse import Namespace
 from pathlib import Path
