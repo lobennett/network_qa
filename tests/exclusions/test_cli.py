@@ -12,7 +12,7 @@ def test_cli_compile_writes_lockfile(tmp_path, monkeypatch):
                         lambda *a, **k: {"_meta": {"dataset": "discovery"}, "exclusions": []})
     out = tmp_path / "lock.json"
     cli.main(["compile", "--dataset", "discovery", "--out", str(out),
-              "--motion-metrics-tsv", "/x.tsv"])
+              "--mriqc-dir", "/x"])
     assert json.loads(out.read_text())["_meta"]["dataset"] == "discovery"
 
 

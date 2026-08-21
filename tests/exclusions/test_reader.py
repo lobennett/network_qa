@@ -67,19 +67,19 @@ def test_motion_entry_is_enforceable(tmp_path):
     silently MISS it -- motion exclusions were unenforceable. With motion now
     emitting prefixed entities, the prefixed query matches.
     """
+    import json
     from argparse import Namespace
-    import pandas as pd
     from network_qa.exclusions.motion import MotionGenerator
 
-    tsv = tmp_path / "motion_metrics.tsv"
-    pd.DataFrame([
-        {"subject": "s03", "session": "05", "task": "rest", "run": "1",
-         "fmriprep_fd_mean": 0.30, "fmriprep_proportion_fd_over_0.5": 0.0,
-         "fmriprep_proportion_std_dvars_over_1.5": 0.0},
-    ]).to_csv(tsv, sep="\t", index=False)
+    d = tmp_path / "sub-s03" / "ses-05" / "func"
+    d.mkdir(parents=True)
+    (d / "sub-s03_ses-05_task-rest_run-1_bold.json").write_text(json.dumps(
+        {"fd_mean": 0.30, "fd_perc": 0.0, "dvars_std": 1.0,
+         "provenance": {"settings": {"fd_thres": 0.5}}}))
 
-    args = Namespace(motion_metrics_tsv=str(tsv), fd_threshold=0.2,
-                     proportion_fd_threshold=0.2, proportion_dvars_threshold=0.2)
+    args = Namespace(mriqc_dir=str(tmp_path), fd_threshold=0.2,
+                     proportion_fd_threshold=0.2, expect_fd_thres=0.5,
+                     dvars_std_threshold=None)
     entries = MotionGenerator().generate("discovery", {}, args)
 
     assert is_excluded("sub-s03", "ses-05", "task-rest", "run-1", entries) is True

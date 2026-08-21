@@ -14,13 +14,20 @@ produces its evidence:
 
 | Compile | Runs after | Generators | Gates |
 |---|---|---|---|
-| `qa-motion` | fMRIPrep | `motion`, `behavioral` | what enters lev1 |
+| `qa-motion` | MRIQC | `motion`, `behavioral` | what enters lev1 |
 | `qa-lev1` | `glm-outliers` | `motion`, `behavioral`, `lev1_outlier` | what enters lev2 |
 
 ```bash
 network-qa compile --dataset discovery --generators motion behavioral \
-    --bids-dir <bids> --out lock.json --motion-metrics-tsv <motion_metrics.tsv>
+    --bids-dir <bids> --out lock.json --mriqc-dir <mriqc derivatives>
 ```
+
+Motion comes from MRIQC rather than fMRIPrep confounds, so the exclusion set is known
+before preprocessing. `fd_perc` counts frames above whatever `--fd_thres` MRIQC ran with,
+so the generator refuses IQMs whose recorded threshold is not the expected 0.5 mm rather
+than applying the wrong cutoff. The study's old *proportion of std_dvars > 1.5* criterion
+has no MRIQC equivalent (MRIQC reports mean `dvars_std`); `--dvars-std-threshold` offers a
+mean-based substitute and is off by default.
 
 `glm-lev1 --exclusions-file lock.json` reads the result. The lockfile carries the package commit
 and each entry's source and reason, so a model's exclusion set is traceable to the evidence.
@@ -29,7 +36,7 @@ and each entry's source and reason, so a model's exclusion set is traceable to t
 
 | Generator | Reads | Excludes a run when |
 |---|---|---|
-| `motion` | fMRIPrep's `motion_metrics.tsv` | FD/DVARS exceed the study thresholds |
+| `motion` | MRIQC's IQMs (`fd_mean`, `fd_perc`) | rest mean FD, or too many task frames over 0.5 mm |
 | `behavioral` | `network_events`' `_desc-truncation.json` sidecars | truncation dropped more than half its test trials |
 | `lev1_outlier` | `network_glm`'s `lev1_outliers.csv` | VIF or outlier-percentage rules flag it |
 | `qa_decisions` | a hand-reviewed decisions TSV | a human said so |
