@@ -25,9 +25,11 @@ network-qa compile --dataset discovery --generators motion behavioral \
 Motion comes from MRIQC rather than fMRIPrep confounds, so the exclusion set is known
 before preprocessing. `fd_perc` counts frames above whatever `--fd_thres` MRIQC ran with,
 so the generator refuses IQMs whose recorded threshold is not the expected 0.5 mm rather
-than applying the wrong cutoff. The study's old *proportion of std_dvars > 1.5* criterion
-has no MRIQC equivalent (MRIQC reports mean `dvars_std`); `--dvars-std-threshold` offers a
-mean-based substitute and is off by default.
+than applying the wrong cutoff. The study's old *proportion of std_dvars > 1.5* criterion is
+not applied: MRIQC publishes mean `dvars_std`, not a proportion, and a mean-based substitute
+excluded nothing FD had not already caught on either cohort (0 additional runs in 291
+discovery and 2308 validation acquisitions). `dvars_std` is still recorded in each entry's
+metrics as evidence.
 
 `glm-lev1 --exclusions-file lock.json` reads the result. The lockfile carries the package commit
 and each entry's source and reason, so a model's exclusion set is traceable to the evidence.
@@ -45,7 +47,8 @@ and each entry's source and reason, so a model's exclusion set is traceable to t
 backward-clock glitch, or at the end of an aborted scan — and records what that cost, but makes no
 exclusion decision. This is where the threshold is applied.
 
-**Not implemented:** the accuracy / RT / omission criteria this study previously applied. They lived in
+**Not implemented:** a DVARS criterion (measured and dropped, see above), and the
+accuracy / RT / omission criteria this study previously applied. They lived in
 `network_events.qc`, which was removed; the per-task thresholds survive as
 `network_events.qc_globals` but the computation would need rewriting.
 

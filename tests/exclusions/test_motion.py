@@ -22,7 +22,7 @@ def iqm(path, *, fd_mean=0.05, fd_perc=0.0, dvars_std=1.0, fd_thres=0.5):
 
 def args(**kw):
     base = dict(mriqc_dir=None, fd_threshold=0.2, proportion_fd_threshold=0.2,
-                expect_fd_thres=0.5, dvars_std_threshold=None)
+                expect_fd_thres=0.5)
     return Namespace(**{**base, **kw})
 
 
@@ -58,12 +58,14 @@ class TestCriteria:
             fd_mean=0.30, fd_perc=1.0)
         assert MotionGenerator().generate("discovery", {}, args(mriqc_dir=str(tmp_path))) == []
 
-    def test_dvars_is_off_by_default(self, tmp_path):
-        iqm(func(tmp_path) / "sub-s03_ses-05_task-flanker_run-1_bold.json", dvars_std=99.0)
-        assert MotionGenerator().generate("discovery", {}, args(mriqc_dir=str(tmp_path))) == []
-        out = MotionGenerator().generate(
-            "discovery", {}, args(mriqc_dir=str(tmp_path), dvars_std_threshold=1.5))
-        assert len(out) == 1 and "dvars_std" in out[0]["reason"]
+    def test_dvars_never_excludes_but_is_recorded(self, tmp_path):
+        """No DVARS criterion: measured on both cohorts, it added nothing FD missed."""
+        iqm(func(tmp_path) / "sub-s03_ses-05_task-rest_run-1_bold.json",
+            fd_mean=0.30, dvars_std=99.0)
+        out = MotionGenerator().generate("discovery", {}, args(mriqc_dir=str(tmp_path)))
+        assert len(out) == 1                          # excluded on FD alone
+        assert "dvars" not in out[0]["reason"]
+        assert out[0]["metrics"]["dvars_std"] == 99.0  # kept as evidence
 
 
 class TestThresholdGuard:

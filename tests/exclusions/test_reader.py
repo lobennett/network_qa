@@ -79,7 +79,7 @@ def test_motion_entry_is_enforceable(tmp_path):
 
     args = Namespace(mriqc_dir=str(tmp_path), fd_threshold=0.2,
                      proportion_fd_threshold=0.2, expect_fd_thres=0.5,
-                     dvars_std_threshold=None)
+)
     entries = MotionGenerator().generate("discovery", {}, args)
 
     assert is_excluded("sub-s03", "ses-05", "task-rest", "run-1", entries) is True

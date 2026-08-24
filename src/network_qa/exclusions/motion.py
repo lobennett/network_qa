@@ -12,10 +12,12 @@ Two criteria map straight onto IQMs:
   to be the study's criterion; the campaign config sets it, and ``--expect-fd-thres``
   refuses a mismatch rather than silently applying the wrong cutoff.
 
-The study's third criterion, *proportion of frames with std_dvars > 1.5*, has no MRIQC
-equivalent -- MRIQC reports mean ``dvars_std``, not a proportion. ``--dvars-std-threshold``
-applies a mean-DVARS cutoff instead, and is OFF by default so dropping the old criterion
-is a deliberate choice rather than a silent one.
+The study's third criterion, *proportion of frames with std_dvars > 1.5*, is NOT applied:
+MRIQC reports mean ``dvars_std``, not a proportion, and a mean-based substitute was measured
+against both cohorts before being dropped. It excluded nothing FD had not already caught --
+0 additional runs in discovery (291 acquisitions, max mean 1.392) and 0 in validation (2308,
+max 1.699, both over-threshold runs already excluded on FD). Reinstating a real spike-count
+criterion needs per-frame FD/DVARS, which MRIQC does not publish in its IQMs.
 
 Multi-echo: MRIQC writes one IQM file per echo. Head motion is shared, so echo-1 stands
 for the acquisition and the others are ignored.
@@ -67,8 +69,6 @@ class MotionGenerator:
         parser.add_argument("--expect-fd-thres", type=float, default=0.5,
                             help="refuse IQMs whose fd_thres differs from this, since "
                                  "fd_perc would then mean something else (default 0.5)")
-        parser.add_argument("--dvars-std-threshold", type=float, default=None,
-                            help="optional mean dvars_std cutoff; off by default")
 
     def generate(self, dataset_name: str, dataset_config: dict, args: Namespace) -> list[dict]:
         root = getattr(args, "mriqc_dir", None)
@@ -82,7 +82,6 @@ class MotionGenerator:
         subjects = dataset_config.get("subjects")
         fd_t = args.fd_threshold
         pfd_t = args.proportion_fd_threshold
-        dv_t = getattr(args, "dvars_std_threshold", None)
         expect = getattr(args, "expect_fd_thres", None)
 
         entries, seen, mismatched = [], 0, set()
@@ -113,9 +112,6 @@ class MotionGenerator:
             elif fd_perc is not None and fd_perc / 100.0 > pfd_t:
                 reasons.append(f"fd_perc ({fd_perc:.1f}%) > {pfd_t:.0%} of frames "
                                f"over {expect} mm")
-            dvars = iqm.get("dvars_std")
-            if dv_t is not None and dvars is not None and dvars > dv_t:
-                reasons.append(f"dvars_std ({dvars:.3f}) > {dv_t}")
 
             if reasons:
                 entries.append({
@@ -123,8 +119,9 @@ class MotionGenerator:
                     "task": f"task-{m['task']}", "run": f"run-{m['run'] or '1'}",
                     "source": "motion", "action": "exclude",
                     "reason": "; ".join(reasons),
+                    # dvars_std is recorded as evidence though nothing thresholds on it.
                     "metrics": {"fd_mean": fd_mean, "fd_perc": fd_perc,
-                                "dvars_std": dvars, "fd_thres": got},
+                                "dvars_std": iqm.get("dvars_std"), "fd_thres": got},
                 })
 
         if mismatched:
