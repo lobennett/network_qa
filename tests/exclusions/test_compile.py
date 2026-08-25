@@ -166,7 +166,7 @@ def test_compile_with_lev1_outlier_generator_flows_through(tmp_path):
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerow({"subject": "sub-s03", "session": "ses-02", "run": "1", "task": "cuedTS",
-                    "contrast": "response_time", "outlier_pct": "2.0", "vif": "18.09",
+                    "contrast": "cue_switch_cost", "outlier_pct": "2.0", "vif": "18.09",
                     "flagged_outliers": "0", "flagged_vif": "1"})
 
     args = Namespace(

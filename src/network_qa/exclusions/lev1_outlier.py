@@ -11,6 +11,15 @@ three OR'd auto-exclude rules to flag whole scans:
 Per-scan aggregation: if any contrast on (subject, session, task, run) fires
 any rule, emit one exclusion entry whose `reason` lists the offending
 contrasts and which rule fired for each.
+
+``task-baseline`` and ``response_time`` are skipped by default. Their VIF is
+high by construction, not because the run is bad: the RT regressor is
+collinear with the task regressors it is derived from, and task-baseline sums
+every condition. Scoring them excluded every subject x task cell in discovery
+(172 entries over 40 cells) on VIFs of 22-59, which is a property of the design
+rather than a data-quality signal. They stay in ``lev1_outliers.csv`` as
+evidence -- the same split as ``dvars_std`` in the motion generator, which is
+recorded but never thresholded. ``--vif-ignore-contrasts`` overrides the list.
 """
 from __future__ import annotations
 
@@ -20,6 +29,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from network_qa.exclusions.base import load_dataset_subjects, register_generator
+
+
+# Contrasts whose VIF is structurally high; see the module docstring.
+DEFAULT_VIF_IGNORE = ("task-baseline", "response_time")
 
 
 @dataclass(frozen=True)
@@ -77,6 +90,7 @@ def _format_contrast_clause(contrast: str, vif: float, outlier_pct: float,
 
 def _aggregate_to_scan_entries(
     rows: list[dict], thresholds: Thresholds,
+    ignore_contrasts: frozenset[str] = frozenset(DEFAULT_VIF_IGNORE),
 ) -> list[dict]:
     """Group rows by (subject, session, task, run); emit one exclusion entry per
     scan that has at least one contrast firing any rule."""
@@ -89,6 +103,8 @@ def _aggregate_to_scan_entries(
     for (subject, session, task, run), scan_rows in sorted(by_scan.items()):
         flagged: list[tuple[str, float, float, list[str]]] = []
         for row in scan_rows:
+            if row["contrast"] in ignore_contrasts:
+                continue
             vif = _to_float_or_zero(row.get("vif"))
             pct = _to_float_or_zero(row.get("outlier_pct"))
             fired = _rules_fired(vif, pct, thresholds)
@@ -143,6 +159,11 @@ class Lev1OutlierGenerator:
         parser.add_argument("--combined-outlier-pct", type=float, default=10.0)
         parser.add_argument("--strict-vif", type=float, default=15.0)
         parser.add_argument("--strict-outlier-pct", type=float, default=15.0)
+        parser.add_argument(
+            "--vif-ignore-contrasts", nargs="*", default=list(DEFAULT_VIF_IGNORE),
+            help="contrasts not scored for exclusion -- their VIF is high by design, "
+                 f"not by data quality (default: {' '.join(DEFAULT_VIF_IGNORE)})",
+        )
 
     def generate(
         self,
@@ -160,6 +181,9 @@ class Lev1OutlierGenerator:
             raise FileNotFoundError(
                 "lev1_outlier generator requires --lev1-outliers-csv"
             )
+        # `is None` not `or`: an explicitly empty list means score every contrast.
+        configured = getattr(args, "vif_ignore_contrasts", None)
+        ignore = frozenset(DEFAULT_VIF_IGNORE if configured is None else configured)
         rows = _read_outliers_csv(args.lev1_outliers_csv)
         sample = load_dataset_subjects(dataset_config)
         if sample is not None:
@@ -171,7 +195,7 @@ class Lev1OutlierGenerator:
                     f"lev1_outlier: dropped {dropped}/{before} rows whose subject "
                     f"is not in dataset '{dataset_name}' ({len(sample)} subjects)."
                 )
-        return _aggregate_to_scan_entries(rows, thresholds)
+        return _aggregate_to_scan_entries(rows, thresholds, ignore)
 
 
 register_generator(Lev1OutlierGenerator())

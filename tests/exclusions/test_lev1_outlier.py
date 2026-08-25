@@ -77,7 +77,7 @@ def test_combined_rule_fires(tmp_path):
     csv_path = tmp_path / "lev1_outliers.csv"
     _write_csv(csv_path, [
         {"subject": "sub-s10", "session": "ses-02", "run": "1", "task": "cuedTS",
-         "contrast": "response_time", "outlier_pct": "11.0", "vif": "11.0",
+         "contrast": "cue_switch_cost", "outlier_pct": "11.0", "vif": "11.0",
          "flagged_outliers": "1", "flagged_vif": "1"},
     ])
     entries = Lev1OutlierGenerator().generate("discovery", {}, _make_args(csv_path))
@@ -119,7 +119,7 @@ def test_per_scan_aggregation_collapses_multiple_contrasts(tmp_path):
     csv_path = tmp_path / "lev1_outliers.csv"
     _write_csv(csv_path, [
         {"subject": "sub-s03", "session": "ses-02", "run": "1", "task": "cuedTS",
-         "contrast": "response_time", "outlier_pct": "2.0", "vif": "18.09",
+         "contrast": "task_switch_cost", "outlier_pct": "2.0", "vif": "18.09",
          "flagged_outliers": "0", "flagged_vif": "1"},
         {"subject": "sub-s03", "session": "ses-02", "run": "1", "task": "cuedTS",
          "contrast": "cue_switch_cost", "outlier_pct": "12.3", "vif": "11.5",
@@ -132,7 +132,7 @@ def test_per_scan_aggregation_collapses_multiple_contrasts(tmp_path):
     entries = Lev1OutlierGenerator().generate("discovery", {}, _make_args(csv_path))
     assert len(entries) == 1
     e = entries[0]
-    assert "response_time" in e["reason"]
+    assert "task_switch_cost" in e["reason"]
     assert "cue_switch_cost" in e["reason"]
     assert "task-baseline" not in e["reason"]
     assert e["metrics"]["n_flagged_contrasts"] == 2
@@ -151,7 +151,7 @@ def test_threshold_configurability(tmp_path):
     csv_path = tmp_path / "lev1_outliers.csv"
     _write_csv(csv_path, [
         {"subject": "sub-s10", "session": "ses-02", "run": "1", "task": "cuedTS",
-         "contrast": "response_time", "outlier_pct": "11.0", "vif": "11.0",
+         "contrast": "cue_switch_cost", "outlier_pct": "11.0", "vif": "11.0",
          "flagged_outliers": "1", "flagged_vif": "1"},
     ])
 
@@ -275,3 +275,58 @@ def test_dataset_filter_skipped_when_no_subjects_file(tmp_path):
     ])
     entries = Lev1OutlierGenerator().generate("anything", {}, _make_args(csv_path))
     assert {e["subject"] for e in entries} == {"sub-s03", "sub-s1035"}
+
+
+class TestStructuralVifContrasts:
+    """task-baseline and response_time are not scored: their VIF is high by design.
+
+    RT is collinear with the task regressors it derives from, and task-baseline sums
+    every condition. Scoring them excluded all 40 discovery subject x task cells.
+    """
+
+    def test_ignored_contrasts_do_not_exclude(self, tmp_path):
+        from network_qa.exclusions.lev1_outlier import Lev1OutlierGenerator
+
+        csv_path = tmp_path / "lev1_outliers.csv"
+        _write_csv(csv_path, [
+            dict(subject="sub-s03", session="ses-02", run="1", task="flanker",
+                 contrast="task-baseline", outlier_pct="1.2", vif="59.45",
+                 flagged_outliers="0", flagged_vif="1"),
+            dict(subject="sub-s03", session="ses-02", run="1", task="flanker",
+                 contrast="response_time", outlier_pct="0.6", vif="22.60",
+                 flagged_outliers="0", flagged_vif="1"),
+        ])
+        assert Lev1OutlierGenerator().generate(
+            "discovery", {}, _make_args(csv_path)) == []
+
+    def test_a_real_contrast_still_excludes(self, tmp_path):
+        """The ignore list must not disable the rule for everything else."""
+        from network_qa.exclusions.lev1_outlier import Lev1OutlierGenerator
+
+        csv_path = tmp_path / "lev1_outliers.csv"
+        _write_csv(csv_path, [
+            dict(subject="sub-s03", session="ses-02", run="1", task="flanker",
+                 contrast="task-baseline", outlier_pct="1.2", vif="59.45",
+                 flagged_outliers="0", flagged_vif="1"),
+            dict(subject="sub-s03", session="ses-02", run="1", task="flanker",
+                 contrast="incongruent-congruent", outlier_pct="1.0", vif="20.0",
+                 flagged_outliers="0", flagged_vif="1"),
+        ])
+        out = Lev1OutlierGenerator().generate("discovery", {}, _make_args(csv_path))
+        assert len(out) == 1
+        # Only the scored contrast appears in the reason.
+        assert "incongruent-congruent" in out[0]["reason"]
+        assert "task-baseline" not in out[0]["reason"]
+
+    def test_ignore_list_is_overridable(self, tmp_path):
+        from network_qa.exclusions.lev1_outlier import Lev1OutlierGenerator
+
+        csv_path = tmp_path / "lev1_outliers.csv"
+        _write_csv(csv_path, [
+            dict(subject="sub-s03", session="ses-02", run="1", task="flanker",
+                 contrast="response_time", outlier_pct="0.6", vif="22.60",
+                 flagged_outliers="0", flagged_vif="1"),
+        ])
+        out = Lev1OutlierGenerator().generate(
+            "discovery", {}, _make_args(csv_path, vif_ignore_contrasts=[]))
+        assert len(out) == 1 and "response_time" in out[0]["reason"]
