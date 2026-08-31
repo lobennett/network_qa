@@ -12,10 +12,14 @@ Per-scan aggregation: if any contrast on (subject, session, task, run) fires
 any rule, emit one exclusion entry whose `reason` lists the offending
 contrasts and which rule fired for each.
 
-``task-baseline`` and ``response_time`` are skipped by default. Their VIF is
-high by construction, not because the run is bad: the RT regressor is
-collinear with the task regressors it is derived from, and task-baseline sums
-every condition. Scoring them excluded every subject x task cell in discovery
+``task-baseline`` and ``response_time`` are skipped by default, because neither is an
+interpretable contrast under the study's RTDur model (Mumford et al. 2023, Nat Hum Behav
+8:349-360, doi:10.1038/s41562-023-01760-0). That model deliberately pairs constant-duration
+condition regressors with a pooled RT-duration regressor, so the RT regressor absorbs the
+mean task response: ``task-baseline`` VIF runs 13.7-59.5 and its sign inverts. The
+differential contrasts the study interprets are unaffected (VIF ~1.1). Skipping these two
+is therefore not a threshold judgement about data quality -- they are the wrong contrasts
+to exclude runs on. Scoring them excluded every subject x task cell in discovery
 (172 entries over 40 cells) on VIFs of 22-59, which is a property of the design
 rather than a data-quality signal. They stay in ``lev1_outliers.csv`` as
 evidence -- the same split as ``dvars_std`` in the motion generator, which is
