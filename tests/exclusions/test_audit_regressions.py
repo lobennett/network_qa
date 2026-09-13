@@ -148,14 +148,16 @@ def test_explicit_roster_scopes_every_generator(tmp_path, generator, roster):
     if roster != "missing":
         subjects.write_text("s03\n" if roster == "member" else "# empty cohort\n")
     config = {"bids_dir": tmp_path, "subjects_file": subjects}
-    if roster == "missing":
+    if roster == "member":
+        entries = compile_exclusions("discovery", config, args, [generator])["exclusions"]
+        assert len(entries) == 1
+        assert is_excluded("sub-s03", "ses-01", "task-flanker", "run-1", entries)
+    elif roster == "missing":
         with pytest.raises(FileNotFoundError):
             compile_exclusions("discovery", config, args, [generator])
     else:
-        entries = compile_exclusions("discovery", config, args, [generator])["exclusions"]
-        assert len(entries) == (1 if roster == "member" else 0)
-        if roster == "member":
-            assert is_excluded("sub-s03", "ses-01", "task-flanker", "run-1", entries)
+        with pytest.raises(ValueError, match="no subjects"):
+            compile_exclusions("discovery", config, args, [generator])
 
 
 @pytest.mark.parametrize("generator,flag", [("lev1_outlier", "--lev1-outliers-csv"),
@@ -210,15 +212,22 @@ def test_motion_strict_boundary_through_cli(tmp_path, task, metric, value, exclu
                        load_lockfile(tmp_path / "lock.json")) is excluded
 
 
-@pytest.mark.parametrize("metric", ["typo", "truncated-row", "blank-identity"])
+@pytest.mark.parametrize("metric", ["typo", "truncated-row", "truncated-optional-column",
+                                    "blank-identity"])
 def test_malformed_outlier_rows_cannot_be_locked(tmp_path, metric):
     path = tmp_path / "outliers.csv"
+    required = "subject,session,task,run,contrast,vif,outlier_pct"
     rows = {
-        "typo": "sub-s03,ses-01,flanker,1,incongruent,broken,0\n",
-        "truncated-row": "sub-s03,ses-01,flanker,1,incongruent\n",
-        "blank-identity": "sub-s03,ses-01,flanker,,incongruent,16,0\n",
+        "typo": (required, "sub-s03,ses-01,flanker,1,incongruent,broken,0\n"),
+        "truncated-row": (required, "sub-s03,ses-01,flanker,1,incongruent\n"),
+        # Truncated past the required columns: the real table also carries
+        # flagged_outliers/flagged_vif.
+        "truncated-optional-column": (f"{required},flagged_outliers,flagged_vif",
+                                      "sub-s03,ses-01,flanker,1,go,18.0,1.0,0\n"),
+        "blank-identity": (required, "sub-s03,ses-01,flanker,,incongruent,16,0\n"),
     }
-    path.write_text("subject,session,task,run,contrast,vif,outlier_pct\n" + rows[metric])
+    header, row = rows[metric]
+    path.write_text(f"{header}\n{row}")
     with pytest.raises(ValueError):
         main(compile_args(tmp_path, ["lev1_outlier"], "--lev1-outliers-csv", path))
     assert not (tmp_path / "lock.json").exists()

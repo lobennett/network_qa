@@ -37,8 +37,8 @@ def list_generators() -> dict[str, ExclusionGenerator]:
 
 def load_dataset_subjects(dataset_config: dict) -> set[str] | None:
     """Return the dataset's subject IDs (with `sub-` prefix) from `subjects_file`,
-    or None if the config has no subjects file. An explicit empty roster selects
-    no subjects; an unreadable configured file raises. Bare IDs in the file
+    or None if the config has no subjects file. A configured roster must name at
+    least one subject; a missing or empty one raises. Bare IDs in the file
     (e.g. `s10`) are normalised to `sub-s10` to match BIDS-prefixed entity IDs.
     """
     raw = dataset_config.get("subjects_file")
@@ -57,6 +57,12 @@ def load_dataset_subjects(dataset_config: dict) -> set[str] | None:
         if not sid or sid.startswith("#"):
             continue
         subjects.add(sid if sid.startswith("sub-") else f"sub-{sid}")
+    if not subjects:
+        raise ValueError(
+            f"Dataset subjects file names no subjects: {path}. Populate the "
+            "roster, or drop `subjects_file` from the dataset config to run "
+            "without cohort filtering."
+        )
     return subjects
 
 

@@ -73,7 +73,7 @@ def _read_outliers_csv(path: Path) -> list[dict]:
             raise ValueError(f"Missing columns in {path}: {sorted(missing)}")
         rows = []
         for row in reader:
-            if None in row or any(row.get(field) is None for field in required):
+            if None in row or any(value is None for value in row.values()):
                 raise ValueError(f"Malformed outlier row in {path}:{reader.line_num}")
             row = {field: value.strip() for field, value in row.items()}
             for field, pattern in (("subject", r"sub-[A-Za-z0-9]+"),

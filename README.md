@@ -48,8 +48,8 @@ duplicate decisions are errors. `pass` and `review` do not override another excl
 An empty lock is **not evidence of complete QC coverage**. Empty valid input tables or
 directories can produce no exclusions, behavioral sidecars retain their documented
 missing/unreadable fallback, and empty/NaN lev1 metrics remain unscored. For API callers,
-an explicit empty `subjects_file` selects no subjects; a missing configured roster is an
-error. The CLI's `--dataset` names the provenance record; it does not select a roster.
+a configured `subjects_file` must name at least one subject; a missing or empty roster is
+an error. The CLI's `--dataset` names the provenance record; it does not select a roster.
 See [the audit record](docs/CODE-REVIEW.md) for tested cases and remaining limits.
 
 ## Generators

@@ -43,7 +43,7 @@ _BOLD_RE = re.compile(
     r"(?:_acq-[A-Za-z0-9]+)?"
     r"(?:_run-(?P<run>[A-Za-z0-9]+))?"
     r"(?:_echo-[0-9]+)?"
-    r"_bold\.nii(?:\.gz)?$"
+    r"_bold\.nii\.gz$"
 )
 
 
@@ -54,7 +54,7 @@ def _expand_subject_to_entries(
     exclusion entry per matched file."""
     sub = subject if subject.startswith("sub-") else f"sub-{subject}"
     out: list[dict] = []
-    for bold in sorted((bids_dir / sub).glob("ses-*/func/*_bold.nii*")):
+    for bold in sorted((bids_dir / sub).glob("ses-*/func/*_bold.nii.gz")):
         m = _BOLD_RE.match(bold.name)
         if not m:
             continue
