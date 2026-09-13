@@ -1,7 +1,6 @@
 """Lev1 outlier exclusion generator.
 
-Reads cohort QC's lev1_outliers.csv (produced upstream by the lev1 cohort-QC
-step — dormant here; network_glm will feed this input later) and applies
+Reads network_glm cohort QC's lev1_outliers.csv and applies
 three OR'd auto-exclude rules to flag whole scans:
 
     combined:        vif >= combined_vif AND outlier_pct >= combined_outlier_pct
@@ -28,11 +27,12 @@ recorded but never thresholded. ``--vif-ignore-contrasts`` overrides the list.
 from __future__ import annotations
 
 import csv
+import re
 from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
 from pathlib import Path
 
-from network_qa.exclusions.base import load_dataset_subjects, register_generator
+from network_qa.exclusions.base import load_dataset_subjects, register_generator, run_entity, validate_number
 
 
 # Contrasts whose VIF is structurally high; see the module docstring.
@@ -49,13 +49,13 @@ class Thresholds:
 
 
 def _to_float_or_zero(value: str | None) -> float:
-    """Empty string / NaN-ish -> 0.0; otherwise parsed float."""
+    """Preserve missing/NaN metrics as zero; reject corrupt numeric text."""
     if value is None or value == "":
         return 0.0
     try:
         f = float(value)
-    except ValueError:
-        return 0.0
+    except ValueError as exc:
+        raise ValueError(f"Invalid lev1 metric: {value!r}") from exc
     if f != f:  # NaN check without importing math
         return 0.0
     return f
@@ -66,7 +66,25 @@ def _read_outliers_csv(path: Path) -> list[dict]:
     if not path.is_file():
         raise FileNotFoundError(f"lev1_outliers.csv not found: {path}")
     with path.open() as f:
-        return list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        required = {"subject", "session", "task", "run", "contrast", "vif", "outlier_pct"}
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"Missing columns in {path}: {sorted(missing)}")
+        rows = []
+        for row in reader:
+            if None in row or any(row.get(field) is None for field in required):
+                raise ValueError(f"Malformed outlier row in {path}:{reader.line_num}")
+            row = {field: value.strip() for field, value in row.items()}
+            for field, pattern in (("subject", r"sub-[A-Za-z0-9]+"),
+                                   ("session", r"ses-[A-Za-z0-9]+"),
+                                   ("task", r"[A-Za-z0-9]+"), ("run", r"[0-9]+")):
+                if not re.fullmatch(pattern, row[field]):
+                    raise ValueError(f"Invalid {field} identity in {path}:{reader.line_num}")
+            if not row["contrast"]:
+                raise ValueError(f"Missing contrast in {path}:{reader.line_num}")
+            rows.append(row)
+        return rows
 
 
 def _rules_fired(vif: float, outlier_pct: float, t: Thresholds) -> list[str]:
@@ -100,7 +118,7 @@ def _aggregate_to_scan_entries(
     scan that has at least one contrast firing any rule."""
     by_scan: dict[tuple[str, str, str, str], list[dict]] = {}
     for row in rows:
-        key = (row["subject"], row["session"], row["task"], row["run"])
+        key = (row["subject"], row["session"], row["task"], run_entity(row["run"]))
         by_scan.setdefault(key, []).append(row)
 
     entries: list[dict] = []
@@ -128,7 +146,7 @@ def _aggregate_to_scan_entries(
             "subject": subject,
             "session": session,
             "task": f"task-{task}",
-            "run": f"run-{run}",
+            "run": run,
             "source": "lev1_outlier",
             "action": "exclude",
             "reason": "lev1_outlier: " + "; ".join(clauses),
@@ -181,6 +199,8 @@ class Lev1OutlierGenerator:
             strict_vif=args.strict_vif,
             strict_outlier_pct=args.strict_outlier_pct,
         )
+        for name, value in vars(thresholds).items():
+            validate_number(value, name, maximum=100 if name.endswith("pct") else None)
         if args.lev1_outliers_csv is None:
             raise FileNotFoundError(
                 "lev1_outlier generator requires --lev1-outliers-csv"

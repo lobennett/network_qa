@@ -11,7 +11,7 @@ import re
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
-from network_qa.exclusions.base import load_dataset_subjects, register_generator
+from network_qa.exclusions.base import load_dataset_subjects, register_generator, run_entity
 from network_qa.decisions import ScanKey, load_decisions
 
 
@@ -29,7 +29,7 @@ def _entry_from_scan_key(key: ScanKey, reason: str) -> dict:
         "subject": _norm_sub(key.subject),
         "session": _norm_ent(key.session, "ses"),
         "task": _norm_ent(key.task, "task"),
-        "run": _norm_ent(key.run, "run"),
+        "run": run_entity(key.run),
         "source": "qa_decisions",
         "action": "exclude",
         "reason": f"qa_decisions: {reason} (scan-level)",
@@ -40,8 +40,10 @@ _BOLD_RE = re.compile(
     r"^(?P<subject>sub-[A-Za-z0-9]+)"
     r"_(?P<session>ses-[A-Za-z0-9]+)"
     r"_task-(?P<task>[A-Za-z0-9]+)"
-    r"_run-(?P<run>[A-Za-z0-9]+)"
-    r"_bold\.nii\.gz$"
+    r"(?:_acq-[A-Za-z0-9]+)?"
+    r"(?:_run-(?P<run>[A-Za-z0-9]+))?"
+    r"(?:_echo-[0-9]+)?"
+    r"_bold\.nii(?:\.gz)?$"
 )
 
 
@@ -52,15 +54,17 @@ def _expand_subject_to_entries(
     exclusion entry per matched file."""
     sub = subject if subject.startswith("sub-") else f"sub-{subject}"
     out: list[dict] = []
-    for bold in (bids_dir / sub).glob("ses-*/func/*_bold.nii.gz"):
+    for bold in sorted((bids_dir / sub).glob("ses-*/func/*_bold.nii*")):
         m = _BOLD_RE.match(bold.name)
         if not m:
             continue
+        if m["subject"] != sub or m["session"] != bold.parent.parent.name:
+            raise ValueError(f"BOLD identity disagrees with its subject/session directory: {bold}")
         out.append({
             "subject": m.group("subject"),
             "session": m.group("session"),
             "task": f"task-{m.group('task')}",
-            "run": f"run-{m.group('run')}",
+            "run": run_entity(m.group('run') or '1'),
             "source": "qa_decisions",
             "action": "exclude",
             "reason": f"qa_decisions: {reason} (subject-level)",

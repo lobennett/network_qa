@@ -18,7 +18,7 @@ from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
 from pathlib import Path
 
-from network_qa.exclusions.base import load_dataset_subjects, register_generator
+from network_qa.exclusions.base import load_dataset_subjects, register_generator, run_entity, validate_number
 
 # A run losing more than half its test trials to truncation is excluded.
 NONMONOTONIC_EXCLUDE_FRACTION = 0.5
@@ -45,6 +45,7 @@ def _scan_nonmonotonic_exclusions(
     unreadable sidecar counts as 0 dropped rather than raising -- that covers runs whose
     events were never generated. One sidecar is one run, so no aggregation is needed.
     """
+    validate_number(threshold, "nonmonotonic_exclude_fraction", maximum=1)
     entries: list[dict] = []
     for sidecar in sorted(bids_dir.glob("sourcedata/events_qc/sub-*/ses-*/*_desc-truncation.json")):
         m = _TRUNCATION_JSON_RE.match(sidecar.name)
@@ -69,7 +70,7 @@ def _scan_nonmonotonic_exclusions(
             "subject": subject,
             "session": m.group("session"),
             "task": f"task-{m.group('task')}",
-            "run": f"run-{m.group('run')}",
+            "run": run_entity(m.group('run')),
             "action": "exclude",
             "source": "behavioral-qc",
             "reason": (

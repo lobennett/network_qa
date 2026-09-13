@@ -33,6 +33,24 @@ metrics as evidence.
 
 `glm-lev1 --exclusions-file lock.json` reads the result. The lockfile carries the package commit
 and each entry's source and reason, so a model's exclusion set is traceable to the evidence.
+After `qa-lev1`, refresh subject fixed effects with the final lock before running lev2.
+Built-in generators emit BIDS-prefixed identities with unpadded numeric runs (`run-1`),
+matching GLM's keys; subject and session labels retain their original zeros.
+
+Selected generators require their declared inputs: an unknown generator, missing motion
+directory, unreadable IQM, invalid scored motion metric, or unverified MRIQC FD threshold
+stops compilation. Ambiguous duplicate IQM acquisitions also stop compilation; multi-echo
+motion still uses echo-1. Threshold arguments must be finite and in their numeric domains.
+Outlier/decision tables require their schema even when empty. Decisions use explicit `-`
+in all three scan fields for subject-level scope; partial identities and conflicting
+duplicate decisions are errors. `pass` and `review` do not override another exclusion.
+
+An empty lock is **not evidence of complete QC coverage**. Empty valid input tables or
+directories can produce no exclusions, behavioral sidecars retain their documented
+missing/unreadable fallback, and empty/NaN lev1 metrics remain unscored. For API callers,
+an explicit empty `subjects_file` selects no subjects; a missing configured roster is an
+error. The CLI's `--dataset` names the provenance record; it does not select a roster.
+See [the audit record](docs/CODE-REVIEW.md) for tested cases and remaining limits.
 
 ## Generators
 

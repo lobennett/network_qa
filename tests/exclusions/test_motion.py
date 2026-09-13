@@ -95,17 +95,18 @@ class TestMultiEcho:
 
 
 class TestScoping:
-    def test_no_mriqc_dir_is_a_noop(self):
-        """--mriqc-dir is non-required: a subset compile leaves it None."""
-        assert MotionGenerator().generate("discovery", {}, args()) == []
+    def test_selected_generator_requires_mriqc_dir(self):
+        with pytest.raises(FileNotFoundError, match="mriqc-dir"):
+            MotionGenerator().generate("discovery", {}, args())
 
-    def test_absent_attribute_is_a_noop(self):
-        assert MotionGenerator().generate("discovery", {}, Namespace()) == []
+    def test_absent_attribute_has_clear_error(self):
+        with pytest.raises(FileNotFoundError, match="mriqc-dir"):
+            MotionGenerator().generate("discovery", {}, Namespace())
 
-    def test_missing_dir_is_a_noop(self, tmp_path):
-        out = MotionGenerator().generate(
-            "discovery", {}, args(mriqc_dir=str(tmp_path / "nope")))
-        assert out == []
+    def test_missing_dir_is_an_error(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="nope"):
+            MotionGenerator().generate(
+                "discovery", {}, args(mriqc_dir=str(tmp_path / "nope")))
 
     def test_dataset_subjects_filter(self, tmp_path):
         for sub in ("sub-s03", "sub-s99"):

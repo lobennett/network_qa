@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 from argparse import ArgumentParser, Namespace
@@ -36,7 +37,8 @@ def list_generators() -> dict[str, ExclusionGenerator]:
 
 def load_dataset_subjects(dataset_config: dict) -> set[str] | None:
     """Return the dataset's subject IDs (with `sub-` prefix) from `subjects_file`,
-    or None if the config has no resolvable subjects file. Bare IDs in the file
+    or None if the config has no subjects file. An explicit empty roster selects
+    no subjects; an unreadable configured file raises. Bare IDs in the file
     (e.g. `s10`) are normalised to `sub-s10` to match BIDS-prefixed entity IDs.
     """
     raw = dataset_config.get("subjects_file")
@@ -48,14 +50,32 @@ def load_dataset_subjects(dataset_config: dict) -> set[str] | None:
         # Try cwd first; the user runs CLI from the repo root.
         path = Path.cwd() / raw
     if not path.is_file():
-        return None
+        raise FileNotFoundError(f"Dataset subjects file not found: {path}")
     subjects: set[str] = set()
     for line in path.read_text().splitlines():
         sid = line.strip()
         if not sid or sid.startswith("#"):
             continue
         subjects.add(sid if sid.startswith("sub-") else f"sub-{sid}")
-    return subjects or None
+    return subjects
+
+
+def validate_number(value, name: str, *, maximum: float | None = None) -> float:
+    """Validate nonnegative finite metrics/thresholds without coercing booleans."""
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0
+            or (maximum is not None and value > maximum)):
+        bound = f" and <= {maximum}" if maximum is not None else ""
+        raise ValueError(f"{name} must be a finite number >= 0{bound}; got {value!r}")
+    return value
+
+
+def run_entity(value: str) -> str:
+    """Use GLM's unpadded run index; subject/session labels retain their zeros."""
+    label = value.removeprefix("run-")
+    if not label.isascii() or not label.isdigit():
+        raise ValueError(f"Invalid run identity: {value!r}; expected a numeric index")
+    return f"run-{label.lstrip('0') or '0'}"
 
 
 # Repo root resolved from this file's location: src/network_qa/exclusions/base.py
@@ -73,6 +93,14 @@ def _git_sha() -> str | None:
     repo, and code_sha drops to null in production lockfiles).
     """
     try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True, cwd=_REPO_ROOT,
+        ).stdout.strip()
+        # A wheel in an application's .venv can sit below an unrelated Git
+        # checkout. Only the actual QA source root may supply this identity.
+        if Path(top).resolve() != _REPO_ROOT.resolve():
+            return None
         sha = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             capture_output=True, text=True, check=True,

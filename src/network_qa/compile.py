@@ -19,12 +19,13 @@ _KEY = ("subject", "session", "task", "run", "source")
 
 def compile_exclusions(dataset_name, dataset_config, args, generator_names=None) -> dict:
     """Run each named (or all registered) generator, merge + dedupe, wrap with _meta."""
-    names = generator_names or list(list_generators())
+    names = list(list_generators()) if generator_names is None else list(generator_names)
+    unknown = set(names) - set(list_generators())
+    if unknown:
+        raise ValueError(f"Unknown exclusion generators: {sorted(unknown)}")
     seen, merged = set(), []
     for name in names:
         gen = get_generator(name)
-        if gen is None:
-            continue
         for entry in gen.generate(dataset_name, dataset_config, args):
             k = tuple(entry.get(f) for f in _KEY)
             if k in seen:
@@ -53,7 +54,10 @@ def write_lockfile(lockfile: dict, out_path) -> Path:
 def load_lockfile(path) -> list[dict]:
     """Read exclusions from a lockfile; accepts wrapped {_meta,exclusions} or bare list."""
     data = json.loads(Path(path).read_text())
-    return data["exclusions"] if isinstance(data, dict) else data
+    entries = data.get("exclusions") if isinstance(data, dict) else data
+    if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+        raise ValueError(f"{path}: exclusions must be a list of objects")
+    return entries
 
 
 def _scan_key(entry: dict) -> tuple:
@@ -67,8 +71,9 @@ def is_excluded(subject: str, session: str, task: str, run: str,
     Consumer-side query helper for network_glm/lev1 (pass an already-loaded exclusions
     list, e.g. from `load_lockfile`). Exact tuple match on (subject, session, task, run),
     considering only entries whose action is in {"exclude", "trim"}. No entity
-    normalization: the lockfile stores BIDS-prefixed entities and the caller must query
-    with the same prefixed form. An entry missing `action` is skipped, not an error.
+    normalization at query time: compiled entries have BIDS-prefixed entities and
+    unpadded numeric runs (run-1, not run-01), matching GLM's keys. The caller must
+    query with the same form. An entry missing `action` is skipped, not an error.
     """
     key = (subject, session, task, run)
     return any(
