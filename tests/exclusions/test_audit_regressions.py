@@ -263,11 +263,57 @@ def test_malformed_lock_is_not_an_empty_exclusion_set(tmp_path, data):
 
 def test_motion_does_not_validate_unselected_subjects(tmp_path):
     root = tmp_path / "mriqc"
-    write_iqm(root / "a")
-    write_iqm(root / "z", fd_perc=None)
+    write_iqm(root)
+    unselected = root / "sub-s10_ses-01_task-flanker_run-1_bold.json"
+    unselected.write_text(json.dumps({"fd_mean": 0.1, "fd_perc": None, "fd_thres": 0.5}))
     args = _build_parser().parse_args(compile_args(tmp_path, ["motion"], "--mriqc-dir", root))
-    lock = compile_exclusions("discovery", {"subjects": set()}, args, ["motion"])
-    assert lock["exclusions"] == []
+    # Bare IDs normalise to the same entity form the lock and roster use.
+    lock = compile_exclusions("discovery", {"subjects": {"s03"}}, args, ["motion"])
+    assert is_excluded("sub-s03", "ses-01", "task-flanker", "run-1", lock["exclusions"])
+    assert not is_excluded("sub-s10", "ses-01", "task-flanker", "run-1", lock["exclusions"])
+
+
+@pytest.mark.parametrize("subjects,roster", [(set(), None), ({"s03"}, "s10\n"),
+                                             ({"s03", "s10"}, None)])
+def test_motion_subject_selection_cannot_silently_empty_the_cohort(tmp_path, subjects, roster):
+    root = tmp_path / "mriqc"
+    write_iqm(root)
+    args = _build_parser().parse_args(compile_args(tmp_path, ["motion"], "--mriqc-dir", root))
+    config = {"subjects": subjects}
+    if roster is not None:
+        subjects_file = tmp_path / "subjects.txt"
+        subjects_file.write_text(roster)
+        config["subjects_file"] = subjects_file
+    if subjects == {"s03", "s10"}:
+        entries = compile_exclusions("discovery", config, args, ["motion"])["exclusions"]
+        assert is_excluded("sub-s03", "ses-01", "task-flanker", "run-1", entries)
+    else:
+        with pytest.raises(ValueError, match="selects no subjects"):
+            compile_exclusions("discovery", config, args, ["motion"])
+
+
+def test_padded_echo_labels_still_score_their_acquisition(tmp_path):
+    root = tmp_path / "mriqc"
+    root.mkdir()
+    for echo in ("01", "02", "03"):
+        (root / f"sub-s03_ses-01_task-flanker_run-1_echo-{echo}_bold.json").write_text(
+            json.dumps({"fd_mean": 0.1, "fd_perc": 30, "fd_thres": 0.5}))
+    main(compile_args(tmp_path, ["motion"], "--mriqc-dir", root))
+    entries = load_lockfile(tmp_path / "lock.json")
+    assert len(entries) == 1
+    assert is_excluded("sub-s03", "ses-01", "task-flanker", "run-1", entries)
+
+
+def test_duplicate_decisions_keep_every_distinct_reason(tmp_path):
+    tsv = write_decisions(tmp_path, [
+        ["s03", "01", "flanker", "1", "exclude", "motion"],
+        ["sub-s03", "ses-01", "task-flanker", "run-01", "exclude", "excessive motion"],
+        ["sub-s03", "ses-01", "task-flanker", "run-1", "exclude", "motion"],
+    ])
+    main(compile_args(tmp_path, ["qa_decisions"], "--decisions-tsv", tsv))
+    entries = load_lockfile(tmp_path / "lock.json")
+    assert len(entries) == 1
+    assert entries[0]["reason"] == "qa_decisions: motion; excessive motion (scan-level)"
 
 
 @pytest.mark.parametrize("vif,pct,excluded", [(9.999, 10, False), (10, 10, True),

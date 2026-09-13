@@ -35,6 +35,11 @@ def list_generators() -> dict[str, ExclusionGenerator]:
     return dict(_REGISTRY)
 
 
+def subject_entity(value: str) -> str:
+    """Normalise a bare subject ID (`s10`) to its BIDS entity form (`sub-s10`)."""
+    return value if value.startswith("sub-") else f"sub-{value}"
+
+
 def load_dataset_subjects(dataset_config: dict) -> set[str] | None:
     """Return the dataset's subject IDs (with `sub-` prefix) from `subjects_file`,
     or None if the config has no subjects file. A configured roster must name at
@@ -56,7 +61,7 @@ def load_dataset_subjects(dataset_config: dict) -> set[str] | None:
         sid = line.strip()
         if not sid or sid.startswith("#"):
             continue
-        subjects.add(sid if sid.startswith("sub-") else f"sub-{sid}")
+        subjects.add(subject_entity(sid))
     if not subjects:
         raise ValueError(
             f"Dataset subjects file names no subjects: {path}. Populate the "

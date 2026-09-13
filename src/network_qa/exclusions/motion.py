@@ -29,7 +29,9 @@ import re
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
-from network_qa.exclusions.base import load_dataset_subjects, register_generator, run_entity, validate_number
+from network_qa.exclusions.base import (
+    load_dataset_subjects, register_generator, run_entity, subject_entity, validate_number,
+)
 
 ENTITIES = re.compile(
     r"^(?P<subject>sub-[^_]+)_(?P<session>ses-[^_]+)_task-(?P<task>[^_]+)"
@@ -47,7 +49,7 @@ def _iqm_files(mriqc_dir: Path, subjects: set[str] | None = None) -> list[Path]:
         if subjects is not None and m["subject"] not in subjects:
             continue
         echo = m.group("echo")
-        if echo is not None and echo != "1":
+        if echo is not None and int(echo) != 1:
             continue
         key = (m["subject"], m["session"], m["task"], run_entity(m["run"] or "1"))
         if key in keep:
@@ -84,9 +86,17 @@ class MotionGenerator:
             raise FileNotFoundError(f"No MRIQC derivatives at {root}")
 
         subjects = dataset_config.get("subjects")
+        if subjects is not None:
+            subjects = {subject_entity(s) for s in subjects}
         sample = load_dataset_subjects(dataset_config)
         if sample is not None:
-            subjects = sample if subjects is None else sample.intersection(subjects)
+            subjects = sample if subjects is None else sample & subjects
+        if subjects is not None and not subjects:
+            raise ValueError(
+                f"Dataset '{dataset_name}' config selects no subjects. `subjects` "
+                "and `subjects_file` must together name at least one subject; drop "
+                "them to run without cohort filtering."
+            )
         fd_t = validate_number(args.fd_threshold, "fd_threshold")
         pfd_t = validate_number(args.proportion_fd_threshold, "proportion_fd_threshold", maximum=1)
         expect = getattr(args, "expect_fd_thres", None)

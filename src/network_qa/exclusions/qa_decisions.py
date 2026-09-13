@@ -11,12 +11,10 @@ import re
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
-from network_qa.exclusions.base import load_dataset_subjects, register_generator, run_entity
+from network_qa.exclusions.base import (
+    load_dataset_subjects, register_generator, run_entity, subject_entity,
+)
 from network_qa.decisions import ScanKey, load_decisions
-
-
-def _norm_sub(s: str) -> str:
-    return s if s.startswith("sub-") else f"sub-{s}"
 
 
 def _norm_ent(value: str, prefix: str) -> str:
@@ -26,7 +24,7 @@ def _norm_ent(value: str, prefix: str) -> str:
 
 def _entry_from_scan_key(key: ScanKey, reason: str) -> dict:
     return {
-        "subject": _norm_sub(key.subject),
+        "subject": subject_entity(key.subject),
         "session": _norm_ent(key.session, "ses"),
         "task": _norm_ent(key.task, "task"),
         "run": run_entity(key.run),
@@ -52,7 +50,7 @@ def _expand_subject_to_entries(
 ) -> list[dict]:
     """Glob the dataset BIDS dir for `subject`'s BOLD files and emit one
     exclusion entry per matched file."""
-    sub = subject if subject.startswith("sub-") else f"sub-{subject}"
+    sub = subject_entity(subject)
     out: list[dict] = []
     for bold in sorted((bids_dir / sub).glob("ses-*/func/*_bold.nii.gz")):
         m = _BOLD_RE.match(bold.name)
@@ -117,13 +115,13 @@ class QADecisionsGenerator:
                 continue
             # decision.action == "exclude"
             if isinstance(key, ScanKey):
-                if sample is not None and _norm_sub(key.subject) not in sample:
+                if sample is not None and subject_entity(key.subject) not in sample:
                     continue
                 entries.append(_entry_from_scan_key(key, decision.reason))
                 n_scan += 1
             else:
                 # subject-level: key is a bare subject string.
-                if sample is not None and _norm_sub(key) not in sample:
+                if sample is not None and subject_entity(key) not in sample:
                     continue
                 n_subj_rows += 1
                 bids_dir = Path(dataset_config["bids_dir"])

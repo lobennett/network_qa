@@ -39,14 +39,17 @@ def load_decisions(path: Path) -> dict[ScanKey | str, Decision]:
     `ScanKey` as the dict key.
 
     Returns an empty dict if the file does not exist.
-    Raises ValueError on malformed rows or conflicting duplicate decisions.
+    Raises ValueError on malformed rows, or when rows sharing one canonical scan
+    identity disagree on the action. Duplicates that agree on the action are one
+    decision whose reason joins their distinct reasons in file order, so a
+    second row's explanation is neither dropped nor dependent on row order.
     Only explicit '-' in all three scan fields denotes a subject decision.
     """
     if not path.is_file():
         return {}
 
     out: dict[ScanKey | str, Decision] = {}
-    seen: dict[tuple, Decision] = {}
+    seen: dict[tuple, tuple[ScanKey | str, list[str]]] = {}
     with path.open() as f:
         reader = csv.DictReader(f, delimiter="\t")
         required = {"subject", "session", "task", "run", "action"}
@@ -63,7 +66,7 @@ def load_decisions(path: Path) -> dict[ScanKey | str, Decision]:
                     f"invalid action {action!r} in {path}; "
                     f"valid: {sorted(_VALID_ACTIONS)}"
                 )
-            decision = Decision(action=action, reason=row.get("reason", ""))
+            reason = row.get("reason", "")
             identity = [row[field] for field in ("subject", "session", "task", "run")]
             subject_level = identity[1:] == ["-", "-", "-"]
             canonical = []
@@ -77,12 +80,15 @@ def load_decisions(path: Path) -> dict[ScanKey | str, Decision]:
                 canonical.append(run_entity(label) if prefix == "run" else f"{prefix}-{label}")
             canonical_key = tuple(canonical)
             if canonical_key in seen:
-                if seen[canonical_key] != decision:
+                key, reasons = seen[canonical_key]
+                if out[key].action != action:
                     raise ValueError(f"Conflicting decisions for {canonical_key} in {path}:{reader.line_num}")
+                if reason and reason not in reasons:
+                    reasons.append(reason)
+                    out[key] = Decision(action=action, reason="; ".join(reasons))
                 continue
-            seen[canonical_key] = decision
             if subject_level:
-                out[row["subject"]] = decision
+                key = row["subject"]
             else:
                 key = ScanKey(
                     subject=row["subject"],
@@ -90,5 +96,6 @@ def load_decisions(path: Path) -> dict[ScanKey | str, Decision]:
                     task=row["task"],
                     run=row["run"],
                 )
-                out[key] = decision
+            seen[canonical_key] = (key, [reason] if reason else [])
+            out[key] = Decision(action=action, reason=reason)
     return out
