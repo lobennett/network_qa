@@ -31,19 +31,18 @@ class Decision:
 def load_decisions(path: Path) -> dict[ScanKey | str, Decision]:
     """Read a QC decisions TSV.
 
-    Schema (tab-separated):
+    Schema (tab-separated; reason is optional):
         subject  session  task  run  action  reason
 
     Subject-level decisions use "-" for session/task/run; the key in the
     returned dict is the subject string. Scan-level decisions use a
-    `ScanKey` as the dict key.
+    `ScanKey` as the dict key. Keys preserve the first row's spelling.
 
     Returns an empty dict if the file does not exist.
     Raises ValueError on malformed rows, or when rows sharing one canonical scan
     identity disagree on the action. Duplicates that agree on the action are one
-    decision whose reason joins their distinct reasons in file order, so a
-    second row's explanation is neither dropped nor dependent on row order.
-    Only explicit '-' in all three scan fields denotes a subject decision.
+    decision whose reason joins their distinct nonempty reasons in first-seen
+    file order, separated by '; '.
     """
     if not path.is_file():
         return {}

@@ -37,10 +37,12 @@ After `qa-lev1`, refresh subject fixed effects with the final lock before runnin
 Built-in generators emit BIDS-prefixed identities with unpadded numeric runs (`run-1`),
 matching GLM's keys; subject and session labels retain their original zeros.
 
-Selected generators require their declared inputs: an unknown generator, missing motion
-directory, unreadable IQM, invalid scored motion metric, or unverified MRIQC FD threshold
-stops compilation. Ambiguous duplicate IQM acquisitions also stop compilation; multi-echo
-motion still uses echo-1. Threshold arguments must be finite and in their numeric domains.
+For API callers, `generator_names=None` selects all registered generators and `[]`
+selects none. Selected generators require their declared inputs: an unknown generator,
+missing motion directory, unreadable IQM, invalid scored motion metric, or unverified
+MRIQC FD threshold stops compilation. Ambiguous duplicate IQM acquisitions also stop
+compilation; multi-echo motion still uses echo-1. Threshold arguments must be finite
+and in their numeric domains.
 Outlier/decision tables require their schema even when empty. Decisions use explicit `-`
 in all three scan fields for subject-level scope; partial identities and duplicates
 disagreeing on the action are errors, while duplicates that agree keep every distinct
@@ -51,7 +53,9 @@ directories can produce no exclusions, behavioral sidecars retain their document
 missing/unreadable fallback, and empty/NaN lev1 metrics remain unscored. For API callers,
 all generators honor the intersection of `subjects` and `subjects_file`, normalizing
 bare and prefixed subject IDs. A configured selection must name at least one subject;
-a missing roster, empty selection or non-overlapping intersection is an error. The CLI's `--dataset` names the provenance record; it does not select a roster.
+a missing roster, empty selection or non-overlapping intersection is an error, even
+when no generators are selected. Absent/`None` selectors leave the dataset unrestricted.
+The CLI's `--dataset` names the provenance record; it does not select a roster.
 See [the audit record](docs/CODE-REVIEW.md) for tested cases and remaining limits.
 
 ## Generators
@@ -80,27 +84,15 @@ src/network_qa/
   compile.py                run the generators, merge, dedupe, stamp provenance
   decisions.py              parse a hand-reviewed decisions TSV
   exclusions/base.py        generator registry + provenance helpers
-  exclusions/motion.py      FD/DVARS
+  exclusions/motion.py      MRIQC motion evidence
   exclusions/behavioral.py  trial retention after truncation
   exclusions/lev1_outlier.py  VIF / outlier percentage
-  exclusions/qa_decisions.py  manual overrides
+  exclusions/qa_decisions.py  manual exclusions
 ```
 
 ## Setup
 
-```bash
-uv sync --frozen --group dev
-uv run --frozen pytest -q -ra
-```
-
-GitHub Actions runs this full suite on Ubuntu with Python 3.11 for pushes and pull
-requests. The tests cover QA decisions, motion, behavioral and lev1 exclusions,
-generator registration and provenance, compilation, the CLI, and exclusion queries
-using generated fixtures. Standalone runs currently report 93 passed and one
-existing skip: `test_end_to_end_on_real_discovery_cohort_qc` needs
-`/scratch/users/logben/qa_lev1_discovery/lev1_outliers.csv`, which is absent in generic
-Linux CI. Pytest reports the skip reason; CI does not provision participant data or
-run the consumer pipelines.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Keep the venv and cache off `$HOME`:
-`export UV_PROJECT_ENVIRONMENT=$SCRATCH/venvs/network_qa UV_CACHE_DIR=$SCRATCH/.uv`.
+See [CONTRIBUTING.md](CONTRIBUTING.md#setup) for environment setup and test commands.
+The [test workflow](.github/workflows/tests.yml) defines the standalone CI checks;
+the [audit record](docs/CODE-REVIEW.md#validation-and-reproduction) records coverage,
+measured results, data-dependent skips and optional consumer integration instructions.

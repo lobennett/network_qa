@@ -3,7 +3,7 @@
 Generators run in memory and their output merges into a single self-contained
 `{"_meta": ..., "exclusions": [...]}` file. There is no on-disk per-source cache and no
 force-include/force-exclude override layer: a compile is cheap enough to just re-run, and
-manual overrides go through the `qa_decisions` generator instead.
+manual exclusions go through the `qa_decisions` generator instead.
 """
 from __future__ import annotations
 

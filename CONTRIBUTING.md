@@ -1,16 +1,18 @@
 # Contributing
 
 Shared conventions for the `network_*` repos (`network_fmri`, `network_events`, `network_glm`,
-`network_qa`). This file is identical in each.
+`network_qa`).
 
 ## Setup
 
 ```bash
-uv sync
-uv run pytest -q
+uv sync --frozen --group dev
+uv run --frozen pytest -q -ra
 ```
 
 On Sherlock, run both on a compute node (`sh_dev` or `sbatch`), never the login node.
+Keep the venv and cache off `$HOME`:
+`export UV_PROJECT_ENVIRONMENT=$SCRATCH/venvs/network_qa UV_CACHE_DIR=$SCRATCH/.uv`.
 
 Two things that will waste your time otherwise:
 
@@ -30,7 +32,7 @@ drift a pinned dependency.
 A change to a dependency therefore needs three steps:
 
 1. commit and push it there;
-2. bump the `rev` in every repo that pins it (`network_qa` also pins `network_events`);
+2. bump the `rev` in every repo that pins it, as declared in each `pyproject.toml`;
 3. `uv lock && uv sync` in `network_fmri`.
 
 Pins are commit SHAs, not branches, so a rebuild is reproducible.
