@@ -49,8 +49,9 @@ reason. `pass` and `review` do not override another exclusion.
 An empty lock is **not evidence of complete QC coverage**. Empty valid input tables or
 directories can produce no exclusions, behavioral sidecars retain their documented
 missing/unreadable fallback, and empty/NaN lev1 metrics remain unscored. For API callers,
-a configured `subjects_file` or motion `subjects` selection must name at least one
-subject; a missing, empty or non-overlapping selection is an error. The CLI's `--dataset` names the provenance record; it does not select a roster.
+all generators honor the intersection of `subjects` and `subjects_file`, normalizing
+bare and prefixed subject IDs. A configured selection must name at least one subject;
+a missing roster, empty selection or non-overlapping intersection is an error. The CLI's `--dataset` names the provenance record; it does not select a roster.
 See [the audit record](docs/CODE-REVIEW.md) for tested cases and remaining limits.
 
 ## Generators

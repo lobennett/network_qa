@@ -12,7 +12,9 @@ from argparse import Namespace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from network_qa.exclusions.base import code_sha, get_generator, list_generators
+from network_qa.exclusions.base import (
+    code_sha, get_generator, list_generators, load_dataset_subjects,
+)
 
 _KEY = ("subject", "session", "task", "run", "source")
 
@@ -23,6 +25,8 @@ def compile_exclusions(dataset_name, dataset_config, args, generator_names=None)
     unknown = set(names) - set(list_generators())
     if unknown:
         raise ValueError(f"Unknown exclusion generators: {sorted(unknown)}")
+    # Invalid cohort selectors must not produce a lock, even with no generators.
+    load_dataset_subjects(dataset_config)
     seen, merged = set(), []
     for name in names:
         gen = get_generator(name)

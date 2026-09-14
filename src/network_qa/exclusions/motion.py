@@ -30,7 +30,7 @@ from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
 from network_qa.exclusions.base import (
-    load_dataset_subjects, register_generator, run_entity, subject_entity, validate_number,
+    load_dataset_subjects, register_generator, run_entity, validate_number,
 )
 
 ENTITIES = re.compile(
@@ -85,18 +85,7 @@ class MotionGenerator:
         if not root.is_dir():
             raise FileNotFoundError(f"No MRIQC derivatives at {root}")
 
-        subjects = dataset_config.get("subjects")
-        if subjects is not None:
-            subjects = {subject_entity(s) for s in subjects}
-        sample = load_dataset_subjects(dataset_config)
-        if sample is not None:
-            subjects = sample if subjects is None else sample & subjects
-        if subjects is not None and not subjects:
-            raise ValueError(
-                f"Dataset '{dataset_name}' config selects no subjects. `subjects` "
-                "and `subjects_file` must together name at least one subject; drop "
-                "them to run without cohort filtering."
-            )
+        subjects = load_dataset_subjects(dataset_config)
         fd_t = validate_number(args.fd_threshold, "fd_threshold")
         pfd_t = validate_number(args.proportion_fd_threshold, "proportion_fd_threshold", maximum=1)
         expect = getattr(args, "expect_fd_thres", None)

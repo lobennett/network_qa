@@ -35,38 +35,47 @@ def list_generators() -> dict[str, ExclusionGenerator]:
     return dict(_REGISTRY)
 
 
-def subject_entity(value: str) -> str:
-    """Normalise a bare subject ID (`s10`) to its BIDS entity form (`sub-s10`)."""
-    return value if value.startswith("sub-") else f"sub-{value}"
+def _norm_ent(value: str, prefix: str) -> str:
+    """Normalize a BIDS entity to the `<prefix>-<value>` form."""
+    return value if value.startswith(f"{prefix}-") else f"{prefix}-{value}"
 
 
 def load_dataset_subjects(dataset_config: dict) -> set[str] | None:
-    """Return the dataset's subject IDs (with `sub-` prefix) from `subjects_file`,
-    or None if the config has no subjects file. A configured roster must name at
-    least one subject; a missing or empty one raises. Bare IDs in the file
-    (e.g. `s10`) are normalised to `sub-s10` to match BIDS-prefixed entity IDs.
+    """Resolve `subjects` and `subjects_file` to one BIDS-prefixed selection.
+
+    Absent/None selectors leave the dataset unrestricted. Configured selectors
+    intersect after normalizing bare IDs; an empty selection or roster raises.
     """
+    subjects = dataset_config.get("subjects")
+    if subjects is not None:
+        subjects = {_norm_ent(s, "sub") for s in subjects}
     raw = dataset_config.get("subjects_file")
-    if not raw:
-        return None
-    path = Path(raw)
-    if not path.is_absolute():
-        # subjects_file is stored relative to the cwd at registration time.
-        # Try cwd first; the user runs CLI from the repo root.
-        path = Path.cwd() / raw
-    if not path.is_file():
-        raise FileNotFoundError(f"Dataset subjects file not found: {path}")
-    subjects: set[str] = set()
-    for line in path.read_text().splitlines():
-        sid = line.strip()
-        if not sid or sid.startswith("#"):
-            continue
-        subjects.add(subject_entity(sid))
-    if not subjects:
+    if raw:
+        path = Path(raw)
+        if not path.is_absolute():
+            # subjects_file is stored relative to the cwd at registration time.
+            # Try cwd first; the user runs CLI from the repo root.
+            path = Path.cwd() / raw
+        if not path.is_file():
+            raise FileNotFoundError(f"Dataset subjects file not found: {path}")
+        roster: set[str] = set()
+        for line in path.read_text().splitlines():
+            sid = line.strip()
+            if not sid or sid.startswith("#"):
+                continue
+            roster.add(_norm_ent(sid, "sub"))
+        if not roster:
+            raise ValueError(
+                f"Dataset subjects file names no subjects: {path}. Populate the "
+                "roster, or drop `subjects_file` from the dataset config to run "
+                "without cohort filtering."
+            )
+        subjects = roster if subjects is None else subjects & roster
+    if subjects is not None and not subjects:
         raise ValueError(
-            f"Dataset subjects file names no subjects: {path}. Populate the "
-            "roster, or drop `subjects_file` from the dataset config to run "
-            "without cohort filtering."
+            "Dataset config selects no subjects. `subjects` and `subjects_file` "
+            "must together name at least one subject; drop them to run without "
+            "cohort filtering."
         )
     return subjects
 

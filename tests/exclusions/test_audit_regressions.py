@@ -8,7 +8,7 @@ from argparse import Namespace
 import pytest
 
 from network_qa.cli import _build_parser, main
-from network_qa.compile import compile_exclusions, is_excluded, load_lockfile
+from network_qa.compile import compile_exclusions, is_excluded, load_lockfile, write_lockfile
 from network_qa.exclusions import base
 
 
@@ -273,23 +273,73 @@ def test_motion_does_not_validate_unselected_subjects(tmp_path):
     assert not is_excluded("sub-s10", "ses-01", "task-flanker", "run-1", lock["exclusions"])
 
 
-@pytest.mark.parametrize("subjects,roster", [(set(), None), ({"s03"}, "s10\n"),
-                                             ({"s03", "s10"}, None)])
-def test_motion_subject_selection_cannot_silently_empty_the_cohort(tmp_path, subjects, roster):
+@pytest.fixture
+def selection_evidence(tmp_path):
     root = tmp_path / "mriqc"
-    write_iqm(root)
-    args = _build_parser().parse_args(compile_args(tmp_path, ["motion"], "--mriqc-dir", root))
-    config = {"subjects": subjects}
+    csv_path = tmp_path / "outliers.csv"
+    csv_path.write_text("subject,session,task,run,contrast,vif,outlier_pct\n")
+    for subject in ("s03", "s10"):
+        iqm = write_iqm(root / subject)
+        iqm.rename(iqm.with_name(iqm.name.replace("s03", subject)))
+        sidecar = (tmp_path / "sourcedata/events_qc" / f"sub-{subject}" / "ses-01"
+                   / f"sub-{subject}_ses-01_task-flanker_run-01_desc-truncation.json")
+        sidecar.parent.mkdir(parents=True)
+        sidecar.write_text(json.dumps({"FractionTestTrialsDropped": 0.75}))
+        with csv_path.open("a") as stream:
+            stream.write(f"sub-{subject},ses-01,flanker,1,incongruent,16,0\n")
+    tsv = write_decisions(tmp_path, [
+        [subject, "01", "flanker", "01", "exclude", "noisy"]
+        for subject in ("s03", "s10")
+    ])
+    return _build_parser().parse_args(compile_args(
+        tmp_path, ["motion"], "--mriqc-dir", root,
+        "--lev1-outliers-csv", csv_path, "--decisions-tsv", tsv))
+
+
+@pytest.mark.parametrize("generators", [
+    ["motion"], ["behavioral"], ["lev1_outlier"], ["qa_decisions"],
+    ["behavioral", "lev1_outlier", "motion", "qa_decisions"],
+])
+@pytest.mark.parametrize("selection,roster,expected", [
+    ({}, None, {"sub-s03", "sub-s10"}),
+    ({"subjects": None}, None, {"sub-s03", "sub-s10"}),
+    ({"subjects": {"s03"}}, None, {"sub-s03"}),
+    ({"subjects": {"sub-s10"}}, None, {"sub-s10"}),
+    ({"subjects": {"s03", "sub-s10"}}, "s10\n", {"sub-s10"}),
+    ({"subjects": None}, "sub-s10\n", {"sub-s10"}),
+    ({"subjects": set()}, None, None),
+    ({"subjects": {"s03"}}, "s10\n", None),
+])
+def test_subject_selection_scopes_every_generator(
+    tmp_path, selection_evidence, generators, selection, roster, expected,
+):
+    config = {"bids_dir": tmp_path, **selection}
     if roster is not None:
         subjects_file = tmp_path / "subjects.txt"
         subjects_file.write_text(roster)
         config["subjects_file"] = subjects_file
-    if subjects == {"s03", "s10"}:
-        entries = compile_exclusions("discovery", config, args, ["motion"])["exclusions"]
-        assert is_excluded("sub-s03", "ses-01", "task-flanker", "run-1", entries)
-    else:
+    out = tmp_path / "lock.json"
+    out.write_text("previous lock\n")
+    if expected is None:
         with pytest.raises(ValueError, match="selects no subjects"):
-            compile_exclusions("discovery", config, args, ["motion"])
+            write_lockfile(compile_exclusions(
+                "discovery", config, selection_evidence, generators), out)
+        assert out.read_text() == "previous lock\n"
+    else:
+        write_lockfile(compile_exclusions(
+            "discovery", config, selection_evidence, generators), out)
+        entries = load_lockfile(out)
+        assert {(e["subject"], e["source"]) for e in entries} == {
+            (subject, "behavioral-qc" if source == "behavioral" else source)
+            for subject in expected for source in generators}
+        assert len(entries) == len(expected) * len(generators)
+        assert all(e["session"] == "ses-01" and e["task"] == "task-flanker"
+                   and e["run"] == "run-1" for e in entries)
+
+
+def test_empty_generator_list_still_rejects_an_invalid_subject_selection():
+    with pytest.raises(ValueError, match="selects no subjects"):
+        compile_exclusions("discovery", {"subjects": set()}, Namespace(), [])
 
 
 def test_padded_echo_labels_still_score_their_acquisition(tmp_path):

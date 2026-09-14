@@ -16,15 +16,15 @@ The executable cases live in
 [`test_audit_regressions.py`](../tests/exclusions/test_audit_regressions.py).
 Expectations below follow the input contracts and actual GLM consumers, not newly selected
 exclusion criteria. Each correction was reproduced before implementation. Replaying the
-final regression file against baseline source gives **57 failures and 17 passing controls**;
-the corrected implementation passes all 74 cases.
+final regression file against baseline source gives **87 failures and 25 passing controls**;
+the corrected implementation passes all 112 cases.
 
 | Path | Trigger and observed baseline symptom | Correction, proven path and disconfirming case |
 |---|---|---|
 | `compile.py`, selected motion | `--generators motoin` overwrote an existing lock with zero exclusions. Selecting motion without its directory also succeeded. API `[]` selected every registered generator. | Reject unknown names before execution; require motion's input only when selected, as lev1/manual generators already do. `None` selects all, `[]` selects none. A behavioral-only CLI compile still needs no motion inputs. Old tests had confused selecting motion without input with omitting motion from the subset. |
 | Motion evidence | Broken JSON, absent/NaN `fd_perc`, or missing/NaN recorded `fd_thres` could yield a successful lock. A nested zero threshold could fall through to a different top-level threshold. | Reject unreadable IQMs and invalid scored metrics; validate the recorded threshold without truthiness fallback. The existing explicit mismatch guard remains. Valid single acquisitions still score; rest uses mean FD and tasks use percentage FD; DVARS remains evidence only. |
 | Motion identity | Two files with the same subject/session/task/run silently selected the last path: a clean copy masked an over-threshold acquisition. | Reject ambiguous duplicate acquisitions, including acquisition-label collisions in the four-entity lock schema. A single high-FD file excludes; ordinary echo-1/2/3 input still yields one acquisition, and zero-padded echo labels select the same acquisition unpadded ones do rather than dropping it unscored. Subject filtering happens before duplicate/evidence validation. |
-| Roster handling | An empty or missing configured roster disabled filtering; motion ignored `subjects_file` entirely. This admitted out-of-cohort exclusion entries. | A configured roster that names no subject is an operator error, not a zero-subject cohort: both it and a missing file raise; motion also honors the file. Each generator is exercised with empty, missing and one-member rosters. Existing no-roster behavior remains unrestricted. Motion's `subjects` set is normalized to the same `sub-` entity form before it is intersected with the roster, and a selection naming no subject raises instead of compiling an empty lock. |
+| Roster handling | An empty or missing configured roster disabled filtering; motion ignored `subjects_file` entirely. This admitted out-of-cohort exclusion entries. | A configured roster that names no subject is an operator error, not a zero-subject cohort: both it and a missing file raise; motion also honors the file. Each generator is exercised with empty, missing and one-member rosters. Existing no-roster behavior remains unrestricted. Every generator resolves the same intersection of `subjects` and the roster after normalizing bare/prefixed IDs. The compiler also validates this selection before running generators, including an explicitly empty generator list; an empty selection raises before a lock can replace prior output. Behavioral-only and lev1-only calls no longer bypass the motion guard. |
 | Manual decisions | Blank/partial scan fields could broaden a row into a subject decision; duplicate decisions depended on spelling/order. Subject expansion missed multi-echo/acquisition filenames, and a misfiled BOLD could exclude another subject. | Require complete scan identity or explicit `-/-/-`; reject normalized duplicate identities that disagree on the action, and join the distinct reasons of those that agree. Expand supported acquisition/echo variants, default absent run to 1, and verify directory identity. Identical decisions and echo files compile to one acquisition; other subjects/sessions remain unaffected. |
 | Numeric run identity | QA emitted `run-01`, while GLM compared `run-1`. A supposedly excluded run remained in fixed effects. | All built-in generators emit unpadded numeric run entities, preserving subject/session labels. The real sibling integration fails on padded runs before correction and passes for both padded/unpadded inputs afterward. Queries remain exact; no loader rewrite or session relabeling was introduced. |
 | Tables and lock reader | Empty/headerless files looked like valid empty evidence. Truncated CSV rows -- including truncation past the required columns, which crashed -- and arbitrary numeric text could become zero scores; blank run IDs made unusable exclusions. Non-list lock payloads were returned as though they were exclusion collections. | Validate required table columns, row shape and outlier identity; reject invalid scored numeric text and non-list/non-object lock structures. Header-only schema-valid tables remain empty. Empty/NaN lev1 metrics still score as zero; positive infinite VIF still fires the existing strict rule. |
@@ -60,7 +60,7 @@ arithmetic. The two synthetic image cases verify the concrete consumer boundary.
 ## Validation and reproduction
 
 Baseline package suite: **93 passed, 1 skipped**. Corrected frozen package suite:
-**167 passed, 2 skipped**. The skips are the existing unavailable participant-data test
+**205 passed, 2 skipped**. The skips are the existing unavailable participant-data test
 and the optional sibling integration module. Running the latter with the managed sibling
 sources and GLM's frozen environment gives **2 passed**.
 `uv build --cache-dir .uv-cache --out-dir .pytest_cache/dist` also passes. An extracted-wheel
@@ -79,8 +79,16 @@ MPLCONFIGDIR="$PWD/.pytest_cache/mpl" \
 "$GLM_PYTHON" -m pytest tests/integration -q --basetemp .pytest_cache/integration
 ```
 
+The shared-selection regression matrix gives **15 failures and 26 passing controls**
+against the prior review head `ffed9560`, then **41 passed** after correction. It covers
+each generator alone and the mixed compile, absent/None controls, bare/prefixed IDs,
+intersections and invalid selections, checking actual serialized exclusions and preservation
+of an existing lock on failure. The generic entity normalizer now has one shared owner;
+existing decision/API tests retain the raw `ScanKey` and session/task behavior.
+
 Local validation used `--cache-dir .uv-cache` and worktree-local pytest temporary
-directories. The manifest and frozen dependency lock were preserved. No configured
+directories. Manifest/lock changes are limited to the dependency removal above,
+without unrelated version upgrades. No configured
 lint/type-check or GitHub CI workflow exists in this package at baseline. Publication
 review and shipping are delegated to Firstmate's no-mistakes stage after this commit.
 
