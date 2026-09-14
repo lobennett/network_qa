@@ -69,9 +69,18 @@ src/network_qa/
 ## Setup
 
 ```bash
-uv sync
-uv run pytest -q
+uv sync --frozen --group dev
+uv run --frozen pytest -q -ra
 ```
+
+GitHub Actions runs this full suite on Ubuntu with Python 3.11 for pushes and pull
+requests. The tests cover QA decisions, motion, behavioral and lev1 exclusions,
+generator registration and provenance, compilation, the CLI, and exclusion queries
+using generated fixtures. Standalone runs currently report 93 passed and one
+existing skip: `test_end_to_end_on_real_discovery_cohort_qc` needs
+`/scratch/users/logben/qa_lev1_discovery/lev1_outliers.csv`, which is absent in generic
+Linux CI. Pytest reports the skip reason; CI does not provision participant data or
+run the consumer pipelines.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Keep the venv and cache off `$HOME`:
 `export UV_PROJECT_ENVIRONMENT=$SCRATCH/venvs/network_qa UV_CACHE_DIR=$SCRATCH/.uv`.
