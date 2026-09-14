@@ -29,7 +29,9 @@ import re
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
-from network_qa.exclusions.base import register_generator
+from network_qa.exclusions.base import (
+    load_dataset_subjects, register_generator, run_entity, validate_number,
+)
 
 ENTITIES = re.compile(
     r"^(?P<subject>sub-[^_]+)_(?P<session>ses-[^_]+)_task-(?P<task>[^_]+)"
@@ -37,17 +39,22 @@ ENTITIES = re.compile(
 )
 
 
-def _iqm_files(mriqc_dir: Path) -> list[Path]:
+def _iqm_files(mriqc_dir: Path, subjects: set[str] | None = None) -> list[Path]:
     """One IQM file per acquisition: echo-1 where multi-echo, else the only file."""
     keep: dict[tuple, Path] = {}
     for p in sorted(mriqc_dir.rglob("*_bold.json")):
         m = ENTITIES.match(p.name)
         if not m:
             continue
-        echo = m.group("echo")
-        if echo is not None and echo != "1":
+        if subjects is not None and m["subject"] not in subjects:
             continue
-        keep[(m["subject"], m["session"], m["task"], m["run"] or "1")] = p
+        echo = m.group("echo")
+        if echo is not None and int(echo) != 1:
+            continue
+        key = (m["subject"], m["session"], m["task"], run_entity(m["run"] or "1"))
+        if key in keep:
+            raise ValueError(f"Duplicate MRIQC acquisition {key}: {keep[key]} and {p}")
+        keep[key] = p
     return list(keep.values())
 
 
@@ -73,50 +80,59 @@ class MotionGenerator:
     def generate(self, dataset_name: str, dataset_config: dict, args: Namespace) -> list[dict]:
         root = getattr(args, "mriqc_dir", None)
         if not root:
-            return []                       # subset compile that did not select motion
+            raise FileNotFoundError("motion generator requires --mriqc-dir")
         root = Path(root)
         if not root.is_dir():
-            print(f"No MRIQC derivatives at {root}")
-            return []
+            raise FileNotFoundError(f"No MRIQC derivatives at {root}")
 
-        subjects = dataset_config.get("subjects")
-        fd_t = args.fd_threshold
-        pfd_t = args.proportion_fd_threshold
+        subjects = load_dataset_subjects(dataset_config)
+        fd_t = validate_number(args.fd_threshold, "fd_threshold")
+        pfd_t = validate_number(args.proportion_fd_threshold, "proportion_fd_threshold", maximum=1)
         expect = getattr(args, "expect_fd_thres", None)
+        if expect is not None:
+            validate_number(expect, "expect_fd_thres")
 
         entries, seen, mismatched = [], 0, set()
-        for path in _iqm_files(root):
+        for path in _iqm_files(root, subjects):
             m = ENTITIES.match(path.name)
-            if subjects and m["subject"] not in subjects:
-                continue
             try:
                 iqm = json.loads(path.read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(f"Cannot read MRIQC IQM {path}: {exc}") from exc
+            if not isinstance(iqm, dict):
+                raise ValueError(f"MRIQC IQM must be a JSON object: {path}")
             seen += 1
 
             # fd_perc is a percentage of frames above the threshold MRIQC ran with, so a
             # different fd_thres makes it a different criterion entirely.
-            got = (iqm.get("provenance", {}).get("settings", {}).get("fd_thres")
-                   or iqm.get("fd_thres"))
-            if expect is not None and got is not None and abs(float(got) - expect) > 1e-9:
-                mismatched.add(float(got))
+            try:
+                got = iqm.get("provenance", {}).get("settings", {}).get(
+                    "fd_thres", iqm.get("fd_thres"))
+            except AttributeError as exc:
+                raise ValueError(f"Malformed MRIQC provenance in {path}") from exc
+            if expect is not None:
+                validate_number(got, f"{path}: fd_thres")
+            if expect is not None and abs(got - expect) > 1e-9:
+                mismatched.add(got)
                 continue
 
             reasons = []
             fd_mean = iqm.get("fd_mean")
             fd_perc = iqm.get("fd_perc")
             if m["task"] == "rest":
-                if fd_mean is not None and fd_mean > fd_t:
+                validate_number(fd_mean, f"{path}: fd_mean")
+                if fd_mean > fd_t:
                     reasons.append(f"rest fd_mean ({fd_mean:.3f}) > {fd_t}")
-            elif fd_perc is not None and fd_perc / 100.0 > pfd_t:
-                reasons.append(f"fd_perc ({fd_perc:.1f}%) > {pfd_t:.0%} of frames "
-                               f"over {expect} mm")
+            else:
+                validate_number(fd_perc, f"{path}: fd_perc", maximum=100)
+                if fd_perc / 100.0 > pfd_t:
+                    reasons.append(f"fd_perc ({fd_perc:.1f}%) > {pfd_t:.0%} of frames "
+                                   f"over {expect} mm")
 
             if reasons:
                 entries.append({
                     "subject": m["subject"], "session": m["session"],
-                    "task": f"task-{m['task']}", "run": f"run-{m['run'] or '1'}",
+                    "task": f"task-{m['task']}", "run": run_entity(m['run'] or '1'),
                     "source": "motion", "action": "exclude",
                     "reason": "; ".join(reasons),
                     # dvars_std is recorded as evidence though nothing thresholds on it.

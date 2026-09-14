@@ -11,25 +11,18 @@ import re
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
-from network_qa.exclusions.base import load_dataset_subjects, register_generator
+from network_qa.exclusions.base import (
+    _norm_ent, load_dataset_subjects, register_generator, run_entity,
+)
 from network_qa.decisions import ScanKey, load_decisions
-
-
-def _norm_sub(s: str) -> str:
-    return s if s.startswith("sub-") else f"sub-{s}"
-
-
-def _norm_ent(value: str, prefix: str) -> str:
-    """Normalize a BIDS entity to the `<prefix>-<value>` form."""
-    return value if value.startswith(f"{prefix}-") else f"{prefix}-{value}"
 
 
 def _entry_from_scan_key(key: ScanKey, reason: str) -> dict:
     return {
-        "subject": _norm_sub(key.subject),
+        "subject": _norm_ent(key.subject, "sub"),
         "session": _norm_ent(key.session, "ses"),
         "task": _norm_ent(key.task, "task"),
-        "run": _norm_ent(key.run, "run"),
+        "run": run_entity(key.run),
         "source": "qa_decisions",
         "action": "exclude",
         "reason": f"qa_decisions: {reason} (scan-level)",
@@ -40,7 +33,9 @@ _BOLD_RE = re.compile(
     r"^(?P<subject>sub-[A-Za-z0-9]+)"
     r"_(?P<session>ses-[A-Za-z0-9]+)"
     r"_task-(?P<task>[A-Za-z0-9]+)"
-    r"_run-(?P<run>[A-Za-z0-9]+)"
+    r"(?:_acq-[A-Za-z0-9]+)?"
+    r"(?:_run-(?P<run>[A-Za-z0-9]+))?"
+    r"(?:_echo-[0-9]+)?"
     r"_bold\.nii\.gz$"
 )
 
@@ -50,17 +45,19 @@ def _expand_subject_to_entries(
 ) -> list[dict]:
     """Glob the dataset BIDS dir for `subject`'s BOLD files and emit one
     exclusion entry per matched file."""
-    sub = subject if subject.startswith("sub-") else f"sub-{subject}"
+    sub = _norm_ent(subject, "sub")
     out: list[dict] = []
-    for bold in (bids_dir / sub).glob("ses-*/func/*_bold.nii.gz"):
+    for bold in sorted((bids_dir / sub).glob("ses-*/func/*_bold.nii.gz")):
         m = _BOLD_RE.match(bold.name)
         if not m:
             continue
+        if m["subject"] != sub or m["session"] != bold.parent.parent.name:
+            raise ValueError(f"BOLD identity disagrees with its subject/session directory: {bold}")
         out.append({
             "subject": m.group("subject"),
             "session": m.group("session"),
             "task": f"task-{m.group('task')}",
-            "run": f"run-{m.group('run')}",
+            "run": run_entity(m.group('run') or '1'),
             "source": "qa_decisions",
             "action": "exclude",
             "reason": f"qa_decisions: {reason} (subject-level)",
@@ -113,13 +110,13 @@ class QADecisionsGenerator:
                 continue
             # decision.action == "exclude"
             if isinstance(key, ScanKey):
-                if sample is not None and _norm_sub(key.subject) not in sample:
+                if sample is not None and _norm_ent(key.subject, "sub") not in sample:
                     continue
                 entries.append(_entry_from_scan_key(key, decision.reason))
                 n_scan += 1
             else:
                 # subject-level: key is a bare subject string.
-                if sample is not None and _norm_sub(key) not in sample:
+                if sample is not None and _norm_ent(key, "sub") not in sample:
                     continue
                 n_subj_rows += 1
                 bids_dir = Path(dataset_config["bids_dir"])

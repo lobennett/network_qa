@@ -1,7 +1,7 @@
 """network-qa CLI: compile registered exclusion generators into a lockfile.
 
 Two compiles gate the models, each downstream of the step that produces its evidence:
-motion + behavioural after fMRIPrep decide what enters the first level, lev1 outliers after
+motion + behavioural after MRIQC decide what enters the first level, lev1 outliers after
 the cohort QC decide what enters the second. The full BIDS tree is preprocessed unfiltered,
 so nothing here reshapes a pipeline's inputs.
 """

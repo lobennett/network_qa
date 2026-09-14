@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 from argparse import ArgumentParser, Namespace
@@ -34,28 +35,67 @@ def list_generators() -> dict[str, ExclusionGenerator]:
     return dict(_REGISTRY)
 
 
+def _norm_ent(value: str, prefix: str) -> str:
+    """Normalize a BIDS entity to the `<prefix>-<value>` form."""
+    return value if value.startswith(f"{prefix}-") else f"{prefix}-{value}"
+
+
 def load_dataset_subjects(dataset_config: dict) -> set[str] | None:
-    """Return the dataset's subject IDs (with `sub-` prefix) from `subjects_file`,
-    or None if the config has no resolvable subjects file. Bare IDs in the file
-    (e.g. `s10`) are normalised to `sub-s10` to match BIDS-prefixed entity IDs.
+    """Resolve `subjects` and `subjects_file` to one BIDS-prefixed selection.
+
+    Absent/None selectors leave the dataset unrestricted. Configured selectors
+    intersect after normalizing bare IDs; an empty selection or roster raises.
     """
+    subjects = dataset_config.get("subjects")
+    if subjects is not None:
+        subjects = {_norm_ent(s, "sub") for s in subjects}
     raw = dataset_config.get("subjects_file")
-    if not raw:
-        return None
-    path = Path(raw)
-    if not path.is_absolute():
-        # subjects_file is stored relative to the cwd at registration time.
-        # Try cwd first; the user runs CLI from the repo root.
-        path = Path.cwd() / raw
-    if not path.is_file():
-        return None
-    subjects: set[str] = set()
-    for line in path.read_text().splitlines():
-        sid = line.strip()
-        if not sid or sid.startswith("#"):
-            continue
-        subjects.add(sid if sid.startswith("sub-") else f"sub-{sid}")
-    return subjects or None
+    if raw:
+        path = Path(raw)
+        if not path.is_absolute():
+            # subjects_file is stored relative to the cwd at registration time.
+            # Try cwd first; the user runs CLI from the repo root.
+            path = Path.cwd() / raw
+        if not path.is_file():
+            raise FileNotFoundError(f"Dataset subjects file not found: {path}")
+        roster: set[str] = set()
+        for line in path.read_text().splitlines():
+            sid = line.strip()
+            if not sid or sid.startswith("#"):
+                continue
+            roster.add(_norm_ent(sid, "sub"))
+        if not roster:
+            raise ValueError(
+                f"Dataset subjects file names no subjects: {path}. Populate the "
+                "roster, or drop `subjects_file` from the dataset config to run "
+                "without cohort filtering."
+            )
+        subjects = roster if subjects is None else subjects & roster
+    if subjects is not None and not subjects:
+        raise ValueError(
+            "Dataset config selects no subjects. `subjects` and `subjects_file` "
+            "must together name at least one subject; drop them to run without "
+            "cohort filtering."
+        )
+    return subjects
+
+
+def validate_number(value, name: str, *, maximum: float | None = None) -> float:
+    """Validate nonnegative finite metrics/thresholds without coercing booleans."""
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0
+            or (maximum is not None and value > maximum)):
+        bound = f" and <= {maximum}" if maximum is not None else ""
+        raise ValueError(f"{name} must be a finite number >= 0{bound}; got {value!r}")
+    return value
+
+
+def run_entity(value: str) -> str:
+    """Use GLM's unpadded run index; subject/session labels retain their zeros."""
+    label = value.removeprefix("run-")
+    if not label.isascii() or not label.isdigit():
+        raise ValueError(f"Invalid run identity: {value!r}; expected a numeric index")
+    return f"run-{label.lstrip('0') or '0'}"
 
 
 # Repo root resolved from this file's location: src/network_qa/exclusions/base.py
@@ -73,6 +113,14 @@ def _git_sha() -> str | None:
     repo, and code_sha drops to null in production lockfiles).
     """
     try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True, cwd=_REPO_ROOT,
+        ).stdout.strip()
+        # A wheel in an application's .venv can sit below an unrelated Git
+        # checkout. Only the actual QA source root may supply this identity.
+        if Path(top).resolve() != _REPO_ROOT.resolve():
+            return None
         sha = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             capture_output=True, text=True, check=True,

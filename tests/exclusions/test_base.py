@@ -212,8 +212,7 @@ def test_compile_stamps_resolved_code_sha(monkeypatch):
     """compile_exclusions puts the resolved sha in _meta (regression: it used to
     call the git-only helper directly, yielding null inside the container).
 
-    Uses an unregistered generator name so no generator actually runs (an empty
-    list would mean "all generators" -- `names = generator_names or all`).
+    An explicit empty list runs no generators; None selects all.
     """
     from argparse import Namespace
 
@@ -221,7 +220,7 @@ def test_compile_stamps_resolved_code_sha(monkeypatch):
 
     monkeypatch.setattr(compile_mod, "code_sha", lambda: "494ab9d")
     lock = compile_mod.compile_exclusions(
-        "discovery", {}, Namespace(), generator_names=["__no_such_generator__"]
+        "discovery", {}, Namespace(), generator_names=[]
     )
     assert lock["_meta"]["code_sha"] == "494ab9d"
     assert lock["exclusions"] == []
