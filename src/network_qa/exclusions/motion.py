@@ -1,4 +1,4 @@
-"""Motion exclusions from MRIQC's IQMs.
+"""MRIQC motion evidence and legacy motion exclusions.
 
 MRIQC already runs on every session, so its IQMs are the study's single motion source --
 no recomputation from fMRIPrep confounds, and no dependency on fMRIPrep having run. That
@@ -19,19 +19,191 @@ against both cohorts before being dropped. It excluded nothing FD had not alread
 max 1.699, both over-threshold runs already excluded on FD). Reinstating a real spike-count
 criterion needs per-frame FD/DVARS, which MRIQC does not publish in its IQMs.
 
-Multi-echo: MRIQC writes one IQM file per echo. Head motion is shared, so echo-1 stands
-for the acquisition and the others are ignored.
+``inspect_motion`` is the review-manifest interface.  It consumes already-reviewed
+functional inventory rows, uses their trusted representative image (echo 2 for
+multi-echo acquisitions), and makes missing or invalid evidence explicit.  The legacy
+``MotionGenerator`` remains below for the pre-existing exclusion-lock CLI contract.
 """
 from __future__ import annotations
 
 import json
+import math
 import re
 from argparse import ArgumentParser, Namespace
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 from network_qa.exclusions.base import (
     load_dataset_subjects, register_generator, run_entity, validate_number,
 )
+from network_qa.functional import FunctionalEvidence
+from network_qa.manifest import AcquisitionKey
+
+
+FD_MEAN_THRESHOLD = 0.2
+FD_PERCENT_THRESHOLD = 20.0
+EXPECTED_FD_THRES = 0.5
+
+
+@dataclass(frozen=True)
+class MotionEvidence:
+    """MRIQC motion values and review flags for one functional acquisition."""
+
+    key: AcquisitionKey
+    fd_mean: float | None
+    fd_perc: float | None
+    dvars_std: float | None
+    fd_thres: float | None
+    report_path: Path | None
+    flags: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _IqmCandidate:
+    path: Path
+    key: AcquisitionKey
+    echo: int
+    identity_flags: tuple[str, ...]
+
+
+def inspect_motion(
+    functionals: Iterable[FunctionalEvidence], mriqc_dir: Path
+) -> tuple[MotionEvidence, ...]:
+    """Read trusted MRIQC IQMs and flag reviewable motion evidence problems.
+
+    A multi-echo group without trusted echo 2 deliberately receives no substitute
+    metric.  A genuine single-echo acquisition can use its sole representative image.
+    """
+    candidates = _motion_candidates(mriqc_dir)
+    evidence = []
+    for functional in sorted(functionals, key=lambda row: row.key):
+        echo = functional.representative_echo
+        if echo is None:
+            evidence.append(_empty_motion(functional.key, "missing_echo_2"))
+            continue
+        matches = [
+            candidate for candidate in candidates
+            if candidate.key == functional.key and candidate.echo == echo
+        ]
+        if not matches:
+            evidence.append(_empty_motion(functional.key, "missing_iqm"))
+            continue
+        if len(matches) > 1:
+            evidence.append(_empty_motion(functional.key, "ambiguous_iqm"))
+            continue
+        evidence.append(_read_motion_iqm(matches[0]))
+    return tuple(evidence)
+
+
+def _motion_candidates(mriqc_dir: Path) -> tuple[_IqmCandidate, ...]:
+    if not mriqc_dir.is_dir():
+        return ()
+    candidates = []
+    for path in sorted(mriqc_dir.rglob("*_bold.json")):
+        candidate = _parse_iqm_candidate(path)
+        if candidate is not None:
+            candidates.append(candidate)
+    return tuple(candidates)
+
+
+def _parse_iqm_candidate(path: Path) -> _IqmCandidate | None:
+    stem = path.name.removesuffix(".json")
+    if not stem.endswith("_bold"):
+        return None
+    entities: dict[str, str] = {}
+    for part in stem.removesuffix("_bold").split("_"):
+        name, separator, value = part.partition("-")
+        if not separator or not value or name in entities:
+            return None
+        entities[name] = value
+    try:
+        key = AcquisitionKey(
+            "acquisition",
+            f"sub-{entities['sub']}",
+            f"ses-{entities['ses']}",
+            "func",
+            "bold",
+            task=entities["task"],
+            acquisition=entities.get("acq", ""),
+            direction=entities.get("dir", ""),
+            run=_canonical_run(entities["run"]),
+        )
+        echo = _canonical_index(entities.get("echo", "1"))
+    except (KeyError, ValueError):
+        return None
+    return _IqmCandidate(path, key, echo, _iqm_identity_flags(path, key))
+
+
+def _canonical_index(value: str) -> int:
+    if not value.isascii() or not value.isdigit():
+        raise ValueError(f"invalid numeric BIDS entity: {value!r}")
+    return int(value)
+
+
+def _canonical_run(value: str) -> str:
+    return str(_canonical_index(value))
+
+
+def _iqm_identity_flags(path: Path, key: AcquisitionKey) -> tuple[str, ...]:
+    """Compare filename entities to a conventional derivative ``sub/ses/func`` path."""
+    if path.parent.name != "func":
+        return ()
+    session_parent = path.parent.parent.name
+    subject_parent = path.parent.parent.parent.name
+    if subject_parent != key.subject or session_parent != key.session:
+        return ("identity_mismatch",)
+    return ()
+
+
+def _empty_motion(key: AcquisitionKey, flag: str) -> MotionEvidence:
+    return MotionEvidence(key, None, None, None, None, None, (flag,))
+
+
+def _read_motion_iqm(candidate: _IqmCandidate) -> MotionEvidence:
+    flags = set(candidate.identity_flags)
+    report_path = candidate.path.with_suffix(".html")
+    try:
+        iqm = json.loads(candidate.path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return MotionEvidence(candidate.key, None, None, None, None, report_path,
+                              tuple(sorted((*flags, "malformed_iqm"))))
+    if not isinstance(iqm, dict):
+        return MotionEvidence(candidate.key, None, None, None, None, report_path,
+                              tuple(sorted((*flags, "malformed_iqm"))))
+
+    fd_mean = _finite_number(iqm.get("fd_mean"))
+    fd_perc = _finite_number(iqm.get("fd_perc"))
+    dvars_std = _finite_number(iqm.get("dvars_std"))
+    fd_thres = _iqm_fd_thres(iqm)
+    if None in (fd_mean, fd_perc, dvars_std, fd_thres) or not 0 <= fd_perc <= 100:
+        flags.add("malformed_iqm")
+    if fd_thres is not None and not math.isclose(fd_thres, EXPECTED_FD_THRES,
+                                                 abs_tol=1e-9, rel_tol=0.0):
+        flags.add("fd_thres_mismatch")
+    if "malformed_iqm" not in flags and "fd_thres_mismatch" not in flags:
+        if (fd_mean >= FD_MEAN_THRESHOLD or fd_perc >= FD_PERCENT_THRESHOLD):
+            flags.add("excessive_motion")
+    return MotionEvidence(
+        candidate.key, fd_mean, fd_perc, dvars_std, fd_thres, report_path,
+        tuple(sorted(flags)),
+    )
+
+
+def _iqm_fd_thres(iqm: dict) -> float | None:
+    provenance = iqm.get("provenance")
+    if isinstance(provenance, dict):
+        settings = provenance.get("settings")
+        if isinstance(settings, dict) and "fd_thres" in settings:
+            return _finite_number(settings["fd_thres"])
+    return _finite_number(iqm.get("fd_thres"))
+
+
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 ENTITIES = re.compile(
     r"^(?P<subject>sub-[^_]+)_(?P<session>ses-[^_]+)_task-(?P<task>[^_]+)"
