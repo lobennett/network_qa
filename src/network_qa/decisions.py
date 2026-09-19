@@ -1,4 +1,4 @@
-"""Load user QC decisions from a sidecar TSV."""
+"""Manifest decisions plus compatibility parsing for the legacy sidecar TSV."""
 from __future__ import annotations
 
 import csv
@@ -8,6 +8,14 @@ from pathlib import Path
 from typing import Literal
 
 from network_qa.exclusions.base import run_entity
+from network_qa.manifest import (
+    AcquisitionKey,
+    DecisionRow,
+    anatomical_key,
+    functional_key,
+    read_manifest,
+    write_manifest,
+)
 
 
 Action = Literal["pass", "exclude", "review"]
