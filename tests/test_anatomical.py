@@ -7,15 +7,16 @@ from network_qa.anatomical import inspect_anatomicals
 
 def write_anatomical(
     bids_dir, *, suffix, subject="sub-s01", session="ses-01", acquisition="", run="1",
+    extension=".nii.gz", filename_subject=None, filename_session=None,
 ):
     anat = bids_dir / subject / session / "anat"
     anat.mkdir(parents=True, exist_ok=True)
-    entities = [subject, session]
+    entities = [filename_subject or subject, filename_session or session]
     if acquisition:
         entities.append(f"acq-{acquisition}")
     if run:
         entities.append(f"run-{run}")
-    path = anat / ("_".join([*entities, suffix]) + ".nii.gz")
+    path = anat / ("_".join([*entities, suffix]) + extension)
     path.write_bytes(b"anatomical inventory only")
     return path
 
@@ -29,7 +30,8 @@ def write_iqm(mriqc_dir, image, **metrics):
 
 
 def write_report(mriqc_dir, image):
-    path = mriqc_dir / (image.name.removesuffix(".nii.gz") + ".html")
+    stem = image.name.removesuffix(".nii.gz").removesuffix(".nii")
+    path = mriqc_dir / f"{stem}.html"
     path.write_text("MRIQC report")
     return path
 
@@ -179,3 +181,166 @@ def test_evidence_never_approves_anatomicals(tmp_path):
     rows = anatomical_fixture(tmp_path, suffix="T1w", count=2)
 
     assert all(not hasattr(row, "decision") for row in rows)
+
+
+def test_duplicate_compressed_and_uncompressed_encodings_are_one_untrusted_review_row(tmp_path):
+    bids = tmp_path / "bids"
+    mriqc = tmp_path / "mriqc"
+    compressed = write_anatomical(bids, suffix="T1w", extension=".nii.gz")
+    uncompressed = write_anatomical(bids, suffix="T1w", extension=".nii")
+    t2w = write_anatomical(bids, suffix="T2w")
+    for path in (compressed, t2w):
+        write_iqm(mriqc, path, **valid_metrics())
+        write_report(mriqc, path)
+
+    rows = inspect_anatomicals(bids, mriqc, ["sub-s01"])
+    t1w_rows = [row for row in rows if row.key.suffix == "T1w"]
+
+    assert len(t1w_rows) == 1
+    assert len({row.key for row in rows}) == len(rows)
+    assert {"ambiguous_image", "anatomical_count", "untrusted_image"} <= set(t1w_rows[0].flags)
+    assert all(value is None for value in t1w_rows[0].metrics.values())
+    assert t1w_rows[0].recommendation_status == "indeterminate"
+
+
+@pytest.mark.parametrize(
+    "filename_subject,filename_session",
+    [("sub-s99", "ses-01"), ("sub-s01", "ses-02")],
+)
+def test_selected_physical_parent_identity_mismatch_is_retained_as_invalid_observation(
+    tmp_path, filename_subject, filename_session,
+):
+    bids = tmp_path / "bids"
+    image = write_anatomical(
+        bids, suffix="T1w", filename_subject=filename_subject, filename_session=filename_session,
+    )
+    write_anatomical(bids, suffix="T2w")
+
+    rows = inspect_anatomicals(bids, tmp_path / "mriqc", ["sub-s01"])
+    t1w, = [row for row in rows if row.key.suffix == "T1w"]
+
+    assert (t1w.key.subject, t1w.key.session) == ("sub-s01", "ses-01")
+    assert {"identity_mismatch", "untrusted_identity", "anatomical_count"} <= set(t1w.flags)
+    assert t1w.key.record_type == "acquisition"
+    assert t1w.metrics == {name: None for name in t1w.metrics}
+    assert not any(row.key.record_type == "missing_expected" and row.key.suffix == "T1w" for row in rows)
+
+
+@pytest.mark.parametrize("payload", [b"\xff", None])
+def test_non_utf8_and_huge_numeric_iqms_are_malformed_evidence_not_errors(tmp_path, payload):
+    bids = tmp_path / "bids"
+    mriqc = tmp_path / "mriqc"
+    t1w = write_anatomical(bids, suffix="T1w")
+    t2w = write_anatomical(bids, suffix="T2w")
+    iqm_path = write_iqm(mriqc, t1w, **valid_metrics())
+    if payload is None:
+        iqm_path.write_text(json.dumps(valid_metrics(cjv=10 ** 400)))
+    else:
+        iqm_path.write_bytes(payload)
+    write_report(mriqc, t1w)
+    write_iqm(mriqc, t2w, **valid_metrics())
+    write_report(mriqc, t2w)
+
+    rows = inspect_anatomicals(bids, mriqc, ["sub-s01"])
+    t1w_row, = [row for row in rows if row.key.suffix == "T1w"]
+
+    assert "malformed_iqm" in t1w_row.flags
+    assert t1w_row.metrics["cjv"] is None
+
+
+@pytest.mark.parametrize("kind", ["empty", "directory", "broken_symlink", "unreadable"])
+def test_invalid_mriqc_reports_are_explicit_and_cannot_support_recommendations(tmp_path, kind):
+    bids = tmp_path / "bids"
+    mriqc = tmp_path / "mriqc"
+    first = write_anatomical(bids, suffix="T1w", acquisition="first", run="1")
+    second = write_anatomical(bids, suffix="T1w", acquisition="second", run="2")
+    t2w = write_anatomical(bids, suffix="T2w")
+    for path in (first, second, t2w):
+        write_iqm(mriqc, path, **valid_metrics())
+    invalid = mriqc / f"{first.name.removesuffix('.nii.gz')}.html"
+    if kind == "empty":
+        invalid.write_text("")
+    elif kind == "directory":
+        invalid.mkdir()
+    elif kind == "broken_symlink":
+        invalid.symlink_to(mriqc / "missing-report.html")
+    else:
+        invalid.write_text("MRIQC report")
+        invalid.chmod(0)
+    write_report(mriqc, second)
+    write_report(mriqc, t2w)
+
+    try:
+        rows = inspect_anatomicals(bids, mriqc, ["sub-s01"])
+    finally:
+        if kind == "unreadable":
+            invalid.chmod(0o644)
+    t1w_rows = [row for row in rows if row.key.suffix == "T1w"]
+    first_row, = [row for row in t1w_rows if row.key.acquisition == "first"]
+
+    assert first_row.report_path is None
+    assert "invalid_report" in first_row.flags
+    assert {row.recommendation_status for row in t1w_rows} == {"clear"}
+    assert {row.recommendation for row in t1w_rows} == {"keep-second"}
+
+
+def test_counts_anatomicals_across_sessions_for_each_subject(tmp_path):
+    bids = tmp_path / "bids"
+    mriqc = tmp_path / "mriqc"
+    first = write_anatomical(bids, suffix="T1w", session="ses-01")
+    second = write_anatomical(bids, suffix="T1w", session="ses-02")
+    t2w = write_anatomical(bids, suffix="T2w", session="ses-01")
+    for path in (first, second, t2w):
+        write_iqm(mriqc, path, **valid_metrics())
+        write_report(mriqc, path)
+
+    rows = inspect_anatomicals(bids, mriqc, ["sub-s01"])
+    t1w_rows = [row for row in rows if row.key.suffix == "T1w"]
+
+    assert len(t1w_rows) == 2
+    assert all("anatomical_count" in row.flags for row in t1w_rows)
+
+
+def test_ambiguous_report_is_explicit_and_selects_only_the_complete_duplicate(tmp_path):
+    bids = tmp_path / "bids"
+    mriqc = tmp_path / "mriqc"
+    first = write_anatomical(bids, suffix="T1w", acquisition="first", run="1")
+    second = write_anatomical(bids, suffix="T1w", acquisition="second", run="2")
+    t2w = write_anatomical(bids, suffix="T2w")
+    for path in (first, second, t2w):
+        write_iqm(mriqc, path, **valid_metrics(cjv=0.5, cnr=2.0))
+        write_report(mriqc, path)
+    duplicate_report = mriqc / first.name.removesuffix("run-1_T1w.nii.gz")
+    duplicate_report = duplicate_report.with_name(f"{duplicate_report.name}run-01_T1w.html")
+    duplicate_report.write_text("MRIQC report")
+
+    rows = inspect_anatomicals(bids, mriqc, ["sub-s01"])
+    t1w_rows = [row for row in rows if row.key.suffix == "T1w"]
+    first_row, = [row for row in t1w_rows if row.key.acquisition == "first"]
+
+    assert "ambiguous_report" in first_row.flags
+    assert {row.recommendation for row in t1w_rows} == {"keep-second"}
+
+
+def test_primary_metric_ties_are_indeterminate(tmp_path):
+    rows = duplicate_fixture(tmp_path, cjv=(0.5, 0.5), cnr=(2.0, 2.0))
+    t1w_rows = [row for row in rows if row.key.suffix == "T1w"]
+
+    assert {row.recommendation_status for row in t1w_rows} == {"indeterminate"}
+
+
+@pytest.mark.parametrize("bad_value", [True, "0.5", [], float("nan")])
+def test_wrong_or_nonfinite_metric_types_are_malformed_evidence(tmp_path, bad_value):
+    bids = tmp_path / "bids"
+    mriqc = tmp_path / "mriqc"
+    t1w = write_anatomical(bids, suffix="T1w")
+    t2w = write_anatomical(bids, suffix="T2w")
+    write_iqm(mriqc, t1w, **valid_metrics(cjv=bad_value))
+    write_report(mriqc, t1w)
+    write_iqm(mriqc, t2w, **valid_metrics())
+    write_report(mriqc, t2w)
+
+    rows = inspect_anatomicals(bids, mriqc, ["sub-s01"])
+    t1w_row, = [row for row in rows if row.key.suffix == "T1w"]
+
+    assert "malformed_iqm" in t1w_row.flags

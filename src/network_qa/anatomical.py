@@ -48,6 +48,18 @@ class _IqmCandidate:
     identity_flags: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _ImageGroup:
+    key: AcquisitionKey
+    images: tuple[_ImageCandidate, ...]
+
+
+@dataclass(frozen=True)
+class _ReportCandidate:
+    path: Path
+    valid: bool
+
+
 def inspect_anatomicals(
     bids_dir: Path, mriqc_dir: Path, subjects: Iterable[str],
 ) -> tuple[AnatomicalEvidence, ...]:
@@ -61,22 +73,24 @@ def inspect_anatomicals(
                    if candidate.key.subject in selected_subjects)
     iqms = _iqm_candidates(mriqc_dir)
     reports = _mriqc_reports(mriqc_dir)
-    by_subject_suffix: dict[tuple[str, str], list[_ImageCandidate]] = defaultdict(list)
-    for image in images:
-        by_subject_suffix[image.key.subject, image.key.suffix].append(image)
+    by_subject_suffix: dict[tuple[str, str], list[_ImageGroup]] = defaultdict(list)
+    for group in _image_groups(images):
+        by_subject_suffix[group.key.subject, group.key.suffix].append(group)
 
     rows: list[AnatomicalEvidence] = []
     for subject in sorted(selected_subjects):
         for suffix in _ANATOMICAL_SUFFIXES:
-            candidates = sorted(by_subject_suffix[subject, suffix], key=lambda item: item.key)
-            if not candidates:
+            groups = sorted(by_subject_suffix[subject, suffix], key=lambda item: item.key)
+            if not groups:
                 rows.append(_missing_expected(subject, suffix))
                 continue
-            group = [_observed_evidence(candidate, iqms, reports) for candidate in candidates]
-            if len(group) != 1:
-                group = [_with_count_flag(row) for row in group]
-                group = _with_recommendation(group)
-            rows.extend(group)
+            evidence = [_observed_evidence(group, iqms, reports) for group in groups]
+            physical_count = sum(len(group.images) for group in groups)
+            count_review = physical_count != 1 or any(_untrusted_image(row) for row in evidence)
+            if count_review:
+                evidence = [_with_count_flag(row) for row in evidence]
+                evidence = _with_recommendation(evidence)
+            rows.extend(evidence)
     return tuple(sorted(rows, key=lambda row: row.key))
 
 
@@ -91,8 +105,38 @@ def _image_candidates(bids_dir: Path) -> tuple[_ImageCandidate, ...]:
     for path in paths:
         candidate = _parse_candidate(path, _nifti_stem(path))
         if candidate is not None:
-            candidates.append(candidate)
+            candidates.append(_physical_image_candidate(candidate))
     return tuple(candidates)
+
+
+def _physical_image_candidate(candidate: _ImageCandidate) -> _ImageCandidate:
+    """Bind a BIDS inventory entry to its selected physical subject/session parent."""
+    path = candidate.path
+    physical_key = AcquisitionKey(
+        "acquisition",
+        path.parent.parent.parent.name,
+        path.parent.parent.name,
+        "anat",
+        candidate.key.suffix,
+        acquisition=candidate.key.acquisition,
+        run=candidate.key.run,
+    )
+    flags = set(candidate.identity_flags)
+    if (candidate.key.subject, candidate.key.session) != (
+        physical_key.subject, physical_key.session,
+    ):
+        flags.update(("identity_mismatch", "untrusted_identity"))
+    return _ImageCandidate(path, physical_key, tuple(sorted(flags)))
+
+
+def _image_groups(images: tuple[_ImageCandidate, ...]) -> tuple[_ImageGroup, ...]:
+    grouped: dict[AcquisitionKey, list[_ImageCandidate]] = defaultdict(list)
+    for image in images:
+        grouped[image.key].append(image)
+    return tuple(
+        _ImageGroup(key, tuple(sorted(group, key=lambda item: item.path)))
+        for key, group in sorted(grouped.items())
+    )
 
 
 def _iqm_candidates(mriqc_dir: Path) -> tuple[_IqmCandidate, ...]:
@@ -106,16 +150,27 @@ def _iqm_candidates(mriqc_dir: Path) -> tuple[_IqmCandidate, ...]:
     return tuple(candidates)
 
 
-def _mriqc_reports(mriqc_dir: Path) -> dict[AcquisitionKey, tuple[Path, ...]]:
+def _mriqc_reports(mriqc_dir: Path) -> dict[AcquisitionKey, tuple[_ReportCandidate, ...]]:
     """Index root-level, per-acquisition reports by their complete BIDS identity."""
-    reports: dict[AcquisitionKey, list[Path]] = defaultdict(list)
+    reports: dict[AcquisitionKey, list[_ReportCandidate]] = defaultdict(list)
     if not mriqc_dir.is_dir():
         return {}
     for path in sorted((*mriqc_dir.glob("*_T1w.html"), *mriqc_dir.glob("*_T2w.html"))):
         parsed = _parse_candidate(path, path.name.removesuffix(".html"))
         if parsed is not None:
-            reports[parsed.key].append(path)
+            reports[parsed.key].append(_ReportCandidate(path, _valid_report(path)))
     return {key: tuple(paths) for key, paths in reports.items()}
+
+
+def _valid_report(path: Path) -> bool:
+    """A report must be a real readable file with content, not merely a pathname."""
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
+            return False
+        with path.open("rb") as handle:
+            return bool(handle.read(1))
+    except OSError:
+        return False
 
 
 def _parse_candidate(path: Path, stem: str) -> _ImageCandidate | None:
@@ -183,36 +238,48 @@ def _missing_expected(subject: str, suffix: str) -> AnatomicalEvidence:
 
 
 def _observed_evidence(
-    image: _ImageCandidate,
+    group: _ImageGroup,
     iqms: tuple[_IqmCandidate, ...],
-    reports: dict[AcquisitionKey, tuple[Path, ...]],
+    reports: dict[AcquisitionKey, tuple[_ReportCandidate, ...]],
 ) -> AnatomicalEvidence:
-    flags = set(image.identity_flags)
-    report_path, report_flags = _report_evidence(image.key, reports)
+    flags = {flag for image in group.images for flag in image.identity_flags}
+    if len(group.images) > 1:
+        flags.update(("ambiguous_image", "untrusted_image"))
+    if "untrusted_identity" in flags:
+        return AnatomicalEvidence(
+            group.key, _empty_metrics(), None, tuple(sorted(flags)), "", "", "",
+        )
+    if "untrusted_image" in flags:
+        return AnatomicalEvidence(
+            group.key, _empty_metrics(), None, tuple(sorted(flags)), "", "", "",
+        )
+    report_path, report_flags = _report_evidence(group.key, reports)
     flags.update(report_flags)
-    matches = [iqm for iqm in iqms if iqm.key == image.key]
+    matches = [iqm for iqm in iqms if iqm.key == group.key]
     if not matches:
         flags.add("missing_iqm")
-        return AnatomicalEvidence(image.key, _empty_metrics(), report_path, tuple(sorted(flags)), "", "", "")
+        return AnatomicalEvidence(group.key, _empty_metrics(), report_path, tuple(sorted(flags)), "", "", "")
     if len(matches) > 1:
         flags.add("ambiguous_iqm")
-        return AnatomicalEvidence(image.key, _empty_metrics(), report_path, tuple(sorted(flags)), "", "", "")
+        return AnatomicalEvidence(group.key, _empty_metrics(), report_path, tuple(sorted(flags)), "", "", "")
     iqm = matches[0]
     flags.update(iqm.identity_flags)
     metrics, metric_flags = _read_metrics(iqm.path)
     flags.update(metric_flags)
-    return AnatomicalEvidence(image.key, metrics, report_path, tuple(sorted(flags)), "", "", "")
+    return AnatomicalEvidence(group.key, metrics, report_path, tuple(sorted(flags)), "", "", "")
 
 
 def _report_evidence(
-    key: AcquisitionKey, reports: dict[AcquisitionKey, tuple[Path, ...]],
+    key: AcquisitionKey, reports: dict[AcquisitionKey, tuple[_ReportCandidate, ...]],
 ) -> tuple[Path | None, tuple[str, ...]]:
     matches = reports.get(key, ())
     if not matches:
         return None, ("missing_report",)
+    if any(not report.valid for report in matches):
+        return None, ("invalid_report",)
     if len(matches) > 1:
         return None, ("ambiguous_report",)
-    return matches[0], ()
+    return matches[0].path, ()
 
 
 def _empty_metrics() -> dict[str, float | None]:
@@ -222,7 +289,7 @@ def _empty_metrics() -> dict[str, float | None]:
 def _read_metrics(path: Path) -> tuple[dict[str, float | None], tuple[str, ...]]:
     try:
         raw = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
         return _empty_metrics(), ("malformed_iqm",)
     if not isinstance(raw, dict):
         return _empty_metrics(), ("malformed_iqm",)
@@ -251,7 +318,10 @@ def _snr(raw: dict) -> float | None:
 def _finite_number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
     return number if math.isfinite(number) else None
 
 
@@ -278,6 +348,8 @@ def _recommend(rows: list[AnatomicalEvidence]) -> tuple[str, str, str]:
     if len(rows) != 2:
         return "", "indeterminate", "MRIQC ranking is defined for a duplicate pair."
     first, second = rows
+    if _untrusted_image(first) or _untrusted_image(second):
+        return "", "indeterminate", "At least one duplicate image identity is untrusted."
     first_valid, second_valid = _complete_mriqc(first), _complete_mriqc(second)
     if first_valid != second_valid:
         winner = 0 if first_valid else 1
@@ -307,11 +379,16 @@ def _recommend(rows: list[AnatomicalEvidence]) -> tuple[str, str, str]:
 def _complete_mriqc(row: AnatomicalEvidence) -> bool:
     evidence_flags = {
         "identity_mismatch", "missing_iqm", "ambiguous_iqm", "malformed_iqm",
-        "missing_report", "ambiguous_report",
+        "missing_report", "ambiguous_report", "invalid_report", "untrusted_image",
+        "untrusted_identity",
     }
     return row.report_path is not None and not evidence_flags.intersection(row.flags) and all(
         row.metrics.get(name) is not None for name in METRIC_NAMES
     )
+
+
+def _untrusted_image(row: AnatomicalEvidence) -> bool:
+    return bool({"untrusted_image", "untrusted_identity"}.intersection(row.flags))
 
 
 def _compare(first: float | None, second: float | None, direction: str) -> int | None:
