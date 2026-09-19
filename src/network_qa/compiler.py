@@ -115,9 +115,10 @@ def generation_metadata_digest(metadata: dict) -> str:
 
 def _git(root: Path, *arguments: str) -> str | None:
     try:
-        result = subprocess.run(['git', '-C', str(root), *arguments], capture_output=True,
+        result = subprocess.run(['git', '--no-optional-locks', '-C', str(root), *arguments], capture_output=True,
                                 text=True, check=True, timeout=10)
-        return result.stdout.strip() or None
+        # Empty successful output (notably git status) is distinct from failure.
+        return result.stdout.strip()
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
 
@@ -169,7 +170,9 @@ def _provenance(bids_dir, mriqc_dir):
     input_commits = {record['input_commit'] for record in coverage if record['state'] == 'valid'}
     complete = bool(coverage) and all(record['state'] == 'valid' for record in coverage)
     package_commit = _dataset_commit(package_root)
-    package_dirty = bool(_git(package_root, 'status', '--porcelain')) if package_commit else None
+    package_basis = 'source-checkout' if package_commit else 'unknown'
+    package_status = _git(package_root, 'status', '--porcelain') if package_commit else None
+    package_dirty = None if package_status is None else bool(package_status)
     if package_commit is None:
         # PEP 610 retains the exact source revision for VCS-installed wheels.
         try:
@@ -177,7 +180,9 @@ def _provenance(bids_dir, mriqc_dir):
             install = json.loads(direct_url) if direct_url else {}
             vcs = install.get('vcs_info', {}) if isinstance(install, dict) else {}
             candidate = vcs.get('commit_id') if isinstance(vcs, dict) else None
-            package_commit = candidate if isinstance(candidate, str) else None
+            if isinstance(vcs, dict) and vcs.get('vcs') == 'git' and isinstance(candidate, str) and re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', candidate):
+                package_commit = candidate
+                package_basis = 'pep610-vcs'
         except (OSError, ValueError):
             package_commit = None
     commit = _dataset_commit(bids_dir)
@@ -194,6 +199,7 @@ def _provenance(bids_dir, mriqc_dir):
         'package_commits': {'network_qa': package_commit},
         'package_versions': {'network_qa': version('network_qa')},
         'package_dirty': package_dirty,
+        'package_provenance_basis': package_basis,
     }
 
 
@@ -269,6 +275,7 @@ def collect_decision_evidence(bids_dir: Path, mriqc_dir: Path) -> tuple[tuple[De
         'generation_timestamp': provenance['source_commit_time'],
         'generation_timestamp_basis': 'source-commit-time; null when unavailable',
         'approved_manifest_sha256': None,
+        'approved_metadata_sha256': None,
         'behavioral_evidence': [asdict(row) for row in behavior],
         'row_count': len(rows),
     }

@@ -33,6 +33,7 @@ _REVIEW_FIELDS = frozenset({
 })
 _APPROVAL_FIELDS = frozenset({'approved_manifest_sha256', 'approved_metadata_sha256'})
 _COMMIT = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
+_SHA256 = re.compile(r'[0-9a-f]{64}\Z')
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,7 @@ def _valid_commit(value) -> bool:
     return isinstance(value, str) and _COMMIT.fullmatch(value) is not None
 
 
-def _source_inventory_matches(bids_dir: Path, commit: str, records: list[dict]) -> bool:
+def _source_inventory_matches(bids_dir: Path, commit: str, records: list[dict], *, mriqc=False) -> bool:
     """Compare content to the commit, independent of index flags and ignore rules."""
     if any(record['status'] != 'available' for record in records):
         return False
@@ -94,8 +95,10 @@ def _source_inventory_matches(bids_dir: Path, commit: str, records: list[dict]) 
         header, raw_path = entry.split(b'\t', 1)
         path = os.fsdecode(raw_path)
         parts = Path(path).parts
-        if ((len(parts) > 1 and (parts[0].startswith('sub-') or parts[0] == 'sourcedata'))
-                or path in {'dataset_description.json', 'participants.tsv', 'participants.json', '.bidsignore'}):
+        in_scope = (Path(path).suffix in {'.json', '.html', '.tsv'} if mriqc else
+                    ((len(parts) > 1 and (parts[0].startswith('sub-') or parts[0] == 'sourcedata'))
+                     or path in {'dataset_description.json', 'participants.tsv', 'participants.json', '.bidsignore'}))
+        if in_scope:
             mode, kind, oid = header.decode('ascii').split()
             committed[path] = mode, kind, oid
     if set(committed) != {record['path'] for record in records}:
@@ -129,7 +132,60 @@ def _source_inventory_matches(bids_dir: Path, commit: str, records: list[dict]) 
     return True
 
 
-def _provenance_errors(provenance: dict, bids_dir: Path, records: list[dict]) -> list[str]:
+def _is_ancestor(root: Path, ancestor, head) -> bool:
+    if not _valid_commit(ancestor) or not _valid_commit(head):
+        return False
+    result = subprocess.run([
+        'git', '--no-optional-locks', '-C', str(root), 'merge-base', '--is-ancestor', ancestor, head,
+    ], capture_output=True, timeout=30)
+    return result.returncode == 0
+
+
+def _restore_generation_snapshot(meta: dict, current: dict, bids_dir: Path, mriqc_dir: Path) -> list[str]:
+    """Bind stored commit snapshots to live content before restoring their identity.
+
+    Milestone-only descendants change HEAD/time but not the generated evidence.
+    Everything except these verified snapshot fields remains freshly recomputed.
+    """
+    errors = []
+    stored, live = meta['provenance'], current['provenance']
+    head = live['source_datalad_commit']
+    source = stored['source_datalad_commit']
+    input_commit = live['mriqc_input_commit']
+    source_bound = False
+    checked_content = {}
+    for label, commit in (('source DataLad/Git commit', source), ('MRIQC input commit', input_commit),
+                          ('current source commit', head)):
+        if not _is_ancestor(bids_dir, commit, head):
+            errors.append(f'provenance: {label} is not a known reachable ancestor of current source HEAD')
+            continue
+        if commit not in checked_content:
+            checked_content[commit] = _source_inventory_matches(bids_dir, commit, current['inventory'])
+        if not checked_content[commit]:
+            errors.append(f'provenance: BIDS inventory content not bound to source commit ({label})')
+        elif label == 'source DataLad/Git commit':
+            source_bound = True
+    if source_bound:
+        timestamp = subprocess.run([
+            'git', '--no-optional-locks', '-C', str(bids_dir), 'show', '-s', '--format=%cI', source,
+        ], check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+        live['source_datalad_commit'] = source
+        live['source_commit_time'] = timestamp
+        current['generation_timestamp'] = timestamp
+    stored_mriqc, live_mriqc = stored['mriqc_dataset_commit'], live['mriqc_dataset_commit']
+    if stored_mriqc is not None:
+        if not _is_ancestor(mriqc_dir, stored_mriqc, live_mriqc):
+            errors.append('provenance: MRIQC dataset commit is not a reachable ancestor of current MRIQC HEAD')
+        elif not all(_source_inventory_matches(mriqc_dir, commit, current['mriqc_inventory'], mriqc=True)
+                     for commit in {stored_mriqc, live_mriqc}):
+            errors.append('provenance: MRIQC inventory content is not bound to its dataset commits')
+        else:
+            live['mriqc_dataset_commit'] = stored_mriqc
+    current['generation_metadata_sha256'] = generation_metadata_digest(current)
+    return errors
+
+
+def _provenance_errors(provenance: dict) -> list[str]:
     errors = []
     source = provenance['source_datalad_commit']
     if not _valid_commit(source):
@@ -137,17 +193,16 @@ def _provenance_errors(provenance: dict, bids_dir: Path, records: list[dict]) ->
     mriqc_input = provenance['mriqc_input_commit']
     if not _valid_commit(mriqc_input):
         errors.append('provenance: MRIQC input commit is unknown, incomplete, or conflicting')
-    elif mriqc_input != source:
-        errors.append('provenance: MRIQC input commit does not match source commit')
     if not provenance['mriqc_versions']:
         errors.append('provenance: MRIQC version is unavailable')
     if not _valid_commit(provenance['package_commits']['network_qa']):
         errors.append('provenance: network_qa package commit is unavailable or unbound')
     if provenance['package_dirty']:
         errors.append('provenance: network_qa package checkout is dirty')
-    if _valid_commit(source):
-        if not _source_inventory_matches(bids_dir, source, records):
-            errors.append('provenance: BIDS inventory has changes not bound to source commit')
+    elif provenance['package_provenance_basis'] == 'source-checkout' and provenance['package_dirty'] is not False:
+        errors.append('provenance: network_qa package cleanliness is unknown')
+    elif provenance['package_provenance_basis'] not in {'source-checkout', 'pep610-vcs'}:
+        errors.append('provenance: network_qa package provenance is unavailable or unbound')
     return errors
 
 
@@ -165,6 +220,12 @@ def _check(manifest: Path, metadata: Path, bids_dir: Path, *, require_seal: bool
         meta = json.loads(meta_bytes)
         if not isinstance(meta, dict) or meta.get('schema_version') != 1:
             raise ValueError('unsupported or malformed metadata schema')
+        if not _APPROVAL_FIELDS.issubset(meta):
+            raise ValueError('metadata must contain both approval checksum fields')
+        approval_values = [meta[field] for field in _APPROVAL_FIELDS]
+        if not (all(value is None for value in approval_values) or
+                all(isinstance(value, str) and _SHA256.fullmatch(value) for value in approval_values)):
+            raise ValueError('approval checksums must both be null or both be SHA-256 strings')
         errors = _review_errors(rows)
         if meta.get('generation_metadata_sha256') != generation_metadata_digest(meta):
             errors.append('metadata: generation metadata checksum mismatch; regenerate the pair')
@@ -195,6 +256,7 @@ def _check(manifest: Path, metadata: Path, bids_dir: Path, *, require_seal: bool
                 if len(relative.parts) == 1 or relative.parts[0] != 'code':
                     raise ValueError('approval outputs inside BIDS must be under code/')
         baseline_rows, current = collect_decision_evidence(bids_dir, mriqc_dir)
+        errors.extend(_restore_generation_snapshot(meta, current, bids_dir.resolve(), mriqc_dir))
         # Full reconstruction proves generation identity as well as its evidence.
         # Human review changes the TSV digest, so comparing its whole digest to
         # the generation digest would reject every legitimate reviewed manifest.
@@ -207,14 +269,14 @@ def _check(manifest: Path, metadata: Path, bids_dir: Path, *, require_seal: bool
         for kind in ('inventory', 'mriqc_inventory'):
             if any(record['status'] != 'available' for record in current[kind]):
                 errors.append(f'evidence: unavailable content in {kind}')
-        errors.extend(_provenance_errors(current['provenance'], bids_dir.resolve(), current['inventory']))
+        errors.extend(_provenance_errors(current['provenance']))
         # Detect edits during inspection, including manifest edits during parsing.
         if data != manifest.read_bytes() or meta_bytes != metadata.read_bytes():
             errors.append('concurrency: manifest or metadata changed during validation')
         if current['inventory'] != inventory_records(bids_dir) or current['mriqc_inventory'] != mriqc_inventory_records(mriqc_dir):
             errors.append('concurrency: evidence inventory changed during validation')
         return ApprovalResult(not errors, tuple(errors), digest), meta, meta_bytes, data
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, csv.Error,
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError, csv.Error,
             subprocess.SubprocessError) as exc:
         return ApprovalResult(False, (f'input: {exc}',), digest), None, None, None
 

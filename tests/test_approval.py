@@ -2,7 +2,9 @@
 from dataclasses import replace
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 
 import pytest
@@ -12,6 +14,8 @@ from network_qa.approval import seal_approval, validate_approval
 from network_qa.cli import main
 from network_qa.manifest import read_manifest, write_manifest
 from test_compiler import fixture as evidence_fixture
+
+_REAL_COMPILER_GIT = compiler._git
 
 
 def git(root, *args):
@@ -36,7 +40,7 @@ def generated(tmp_path, monkeypatch):
     package = Path(compiler.__file__).resolve().parents[2]
     def package_git(root, *args):
         if Path(root) == package and args == ('status', '--porcelain'):
-            return None
+            return ''
         return original_git(root, *args)
     monkeypatch.setattr(compiler, '_git', package_git)
     compiler.compile_decisions(bids, mriqc, manifest)
@@ -80,6 +84,7 @@ def test_seal_records_checksum_and_only_changes_metadata_approval_fields(generat
     assert meta_after.pop('approved_manifest_sha256') == result.manifest_sha256
     assert meta_after.pop('approved_metadata_sha256')
     meta_before.pop('approved_manifest_sha256')
+    meta_before.pop('approved_metadata_sha256', None)
     assert meta_after == meta_before
     assert manifest.read_bytes() == before
     assert compiler.inventory_records(bids) == inventory
@@ -151,7 +156,7 @@ def test_any_post_seal_tsv_edit_invalidates_approval(generated, operation):
     assert any('checksum' in e for e in result.errors)
 
 
-@pytest.mark.parametrize('target', ['bids', 'mriqc', 'source_commit', 'metadata', 'root'])
+@pytest.mark.parametrize('target', ['bids', 'mriqc', 'metadata', 'root'])
 @pytest.mark.parametrize('sealed', [False, True])
 def test_stale_inputs_and_metadata_are_rejected(generated, target, sealed, tmp_path):
     manifest, metadata, bids = generated
@@ -163,9 +168,6 @@ def test_stale_inputs_and_metadata_are_rejected(generated, target, sealed, tmp_p
     elif target == 'mriqc':
         mriqc = Path(json.loads(metadata.read_text())['input_roots']['mriqc_dir'])
         next(mriqc.glob('*.html')).write_text('changed report')
-    elif target == 'source_commit':
-        git(bids, '-c', 'user.name=Test', '-c', 'user.email=test@example.org',
-            'commit', '--allow-empty', '-qm', 'new milestone')
     elif target == 'metadata':
         meta_edit(metadata, lambda m: m.update(behavioral_evidence=[]))
     else:
@@ -337,3 +339,207 @@ def test_source_commit_must_bind_symlink_content(generated, tmp_path, kind):
     resolve(manifest)
     result = seal_approval(*generated)
     assert result.ok is (kind == 'annex_valid'), result.errors
+
+
+def save(root, message, minute=0):
+    git(root, 'add', '.')
+    subprocess.run(['git', '-C', str(root), '-c', 'user.name=Test', '-c',
+                    'user.email=test@example.org', 'commit', '--allow-empty', '-qm', message],
+                   env={**os.environ, 'GIT_COMMITTER_DATE': f'2026-09-19T12:{minute:02}:00Z'}, check=True)
+    return git(root, 'rev-parse', 'HEAD')
+
+
+def test_all_three_milestone_saves_preserve_approval(generated):
+    _, old_metadata, bids = generated
+    old_mriqc = Path(json.loads(old_metadata.read_text())['input_roots']['mriqc_dir'])
+    raw_before = compiler.inventory_records(bids)
+    mriqc = bids / 'derivatives/mriqc'
+    mriqc.parent.mkdir()
+    shutil.move(old_mriqc, mriqc)
+    input_commit = git(bids, 'rev-parse', 'HEAD')
+    generation_commit = save(bids, 'mriqc-complete', 1)
+    manifest = bids / 'code/network_fmri/scan_decisions.tsv'
+    compiler.compile_decisions(bids, mriqc, manifest)
+    metadata = manifest.with_suffix('.meta.json')
+    generation = json.loads(metadata.read_text())
+    assert generation['provenance']['source_datalad_commit'] == generation_commit
+    assert generation['provenance']['mriqc_input_commit'] == input_commit
+    save(bids, 'scan-decisions-generated', 2)
+    resolve(manifest)
+    result = seal_approval(manifest, metadata, bids)
+    assert result.ok, result.errors
+    sealed = metadata.read_bytes()
+    save(bids, 'scan-decisions-approved', 3)
+    result = validate_approval(manifest, metadata, bids)
+    assert result.ok, result.errors
+    assert metadata.read_bytes() == sealed
+    approved = json.loads(sealed)
+    assert approved['provenance'] == generation['provenance']
+    assert approved['generation_timestamp'] == generation['generation_timestamp']
+    assert compiler.inventory_records(bids) == raw_before
+    # A descendant commit containing changed raw evidence must still fail.
+    (bids / 'sourcedata/new.txt').write_text('new evidence')
+    save(bids, 'changed raw evidence', 4)
+    assert not validate_approval(manifest, metadata, bids).ok
+
+
+@pytest.mark.parametrize('which', ['source_datalad_commit', 'mriqc_input_commit'])
+@pytest.mark.parametrize('kind', ['diverged', 'missing'])
+def test_stored_commit_must_be_a_reachable_ancestor(generated, which, kind):
+    manifest, metadata, bids = generated
+    candidate = '0' * 40 if kind == 'missing' else git(bids, '-c', 'user.name=Test',
+        '-c', 'user.email=test@example.org', 'commit-tree', git(bids, 'rev-parse', 'HEAD^{tree}'), '-m', 'unrelated')
+    if which == 'mriqc_input_commit':
+        mriqc = Path(json.loads(metadata.read_text())['input_roots']['mriqc_dir'])
+        iqm = next(mriqc.rglob('*_bold.json'))
+        data = json.loads(iqm.read_text())
+        data['provenance']['input_commit'] = candidate
+        iqm.write_text(json.dumps(data))
+        compiler.compile_decisions(bids, mriqc, manifest)
+    else:
+        data = json.loads(metadata.read_text())
+        data['provenance'][which] = candidate
+        if kind == 'diverged':
+            data['provenance']['source_commit_time'] = git(bids, 'show', '-s', '--format=%cI', candidate)
+            data['generation_timestamp'] = data['provenance']['source_commit_time']
+        data['generation_metadata_sha256'] = compiler.generation_metadata_digest(data)
+        metadata.write_text(json.dumps(data))
+    resolve(manifest)
+    result = seal_approval(*generated)
+    assert not result.ok
+    assert any('ancestor' in error for error in result.errors), result.errors
+
+
+def test_mriqc_ancestor_must_have_identical_raw_content(generated):
+    manifest, metadata, bids = generated
+    (bids / 'sourcedata/new.txt').write_text('changed after MRIQC')
+    save(bids, 'changed raw')
+    mriqc = Path(json.loads(metadata.read_text())['input_roots']['mriqc_dir'])
+    compiler.compile_decisions(bids, mriqc, manifest)
+    resolve(manifest)
+    result = seal_approval(*generated)
+    assert not result.ok
+    assert any('MRIQC input commit' in error and 'content' in error for error in result.errors)
+
+
+@pytest.mark.parametrize('failure', ['timeout', 'command_error'])
+def test_unknown_package_cleanliness_blocks_regenerated_pair(generated, monkeypatch, failure):
+    manifest, metadata, bids = generated
+    package = Path(compiler.__file__).resolve().parents[2]
+    original_run = subprocess.run
+    # Remove only the fixture's successful package-status override, then fail the
+    # actual subprocess boundary so _git's success/failure distinction is tested.
+    monkeypatch.setattr(compiler, '_git', _REAL_COMPILER_GIT)
+    def failing_status(command, *args, **kwargs):
+        if str(package) in command and command[-2:] == ['status', '--porcelain']:
+            if failure == 'timeout':
+                raise subprocess.TimeoutExpired(command, 10)
+            raise subprocess.CalledProcessError(128, command)
+        return original_run(command, *args, **kwargs)
+    monkeypatch.setattr(subprocess, 'run', failing_status)
+    mriqc = Path(json.loads(metadata.read_text())['input_roots']['mriqc_dir'])
+    compiler.compile_decisions(bids, mriqc, manifest)
+    resolve(manifest)
+    result = seal_approval(*generated)
+    assert not result.ok
+    assert any('cleanliness' in error for error in result.errors), result.errors
+
+
+def test_verified_vcs_wheel_does_not_require_checkout_status(generated, monkeypatch, tmp_path):
+    manifest, metadata, bids = generated
+    installed = tmp_path / 'installed/lib/python/site-packages/network_qa/compiler.py'
+    installed.parent.mkdir(parents=True)
+    installed.write_text('wheel module')
+    monkeypatch.setattr(compiler, '__file__', str(installed))
+    class VcsDistribution:
+        def read_text(self, filename):
+            assert filename == 'direct_url.json'
+            return json.dumps({'url': 'https://example.org/network_qa.git',
+                               'vcs_info': {'vcs': 'git', 'commit_id': '1' * 40}})
+    monkeypatch.setattr(compiler, 'distribution', lambda name: VcsDistribution())
+    mriqc = Path(json.loads(metadata.read_text())['input_roots']['mriqc_dir'])
+    compiler.compile_decisions(bids, mriqc, manifest)
+    resolve(manifest)
+    result = seal_approval(*generated)
+    assert result.ok, result.errors
+
+
+@pytest.mark.parametrize('field', ['approved_manifest_sha256', 'approved_metadata_sha256'])
+@pytest.mark.parametrize('value', ['missing', True, '', 'abc', [], '0' * 64])
+def test_invalid_approval_metadata_is_structured(generated, field, value, capsys):
+    manifest, metadata, bids = generated
+    resolve(manifest)
+    data = json.loads(metadata.read_text())
+    if value == 'missing':
+        data.pop(field, None)
+    else:
+        data[field] = value
+    metadata.write_text(json.dumps(data))
+    for operation in (seal_approval, validate_approval):
+        result = operation(*generated)
+        assert not result.ok, (field, value)
+        assert result.errors
+    for operation in ('approve', 'validate'):
+        with pytest.raises(SystemExit) as exit_status:
+            main(['decisions', operation, '--manifest', str(manifest), '--metadata', str(metadata),
+                  '--bids-dir', str(bids)])
+        assert exit_status.value.code == 1
+        assert json.loads(capsys.readouterr().out)['ok'] is False
+
+
+def test_generation_has_two_explicit_null_approval_fields(generated):
+    metadata = json.loads(generated[1].read_text())
+    assert metadata['approved_manifest_sha256'] is None
+    assert metadata['approved_metadata_sha256'] is None
+
+
+def test_ancestor_symlink_loop_returns_api_and_cli_errors(generated, tmp_path, capsys):
+    loop = tmp_path / 'loop'
+    loop.symlink_to(loop, target_is_directory=True)
+    for operation in (seal_approval, validate_approval):
+        result = operation(generated[0], generated[1], loop / 'bids')
+        assert not result.ok
+    for operation in ('approve', 'validate'):
+        with pytest.raises(SystemExit) as exit_status:
+            main(['decisions', operation, '--manifest', str(generated[0]), '--metadata', str(generated[1]),
+                  '--bids-dir', str(loop / 'bids')])
+        assert exit_status.value.code == 1
+        assert json.loads(capsys.readouterr().out)['ok'] is False
+
+
+def test_independent_mriqc_dataset_allows_only_content_preserving_descendants(generated):
+    manifest, metadata, bids = generated
+    mriqc = Path(json.loads(metadata.read_text())['input_roots']['mriqc_dir'])
+    git(mriqc, 'init', '-q')
+    saved = save(mriqc, 'MRIQC evidence')
+    compiler.compile_decisions(bids, mriqc, manifest)
+    resolve(manifest)
+    (mriqc / 'README.md').write_text('milestone documentation outside the evidence inventory')
+    save(mriqc, 'documentation only', 1)
+    result = seal_approval(*generated)
+    assert result.ok, result.errors
+    assert json.loads(metadata.read_text())['provenance']['mriqc_dataset_commit'] == saved
+    next(mriqc.glob('*.html')).write_text('changed evidence report')
+    save(mriqc, 'changed evidence', 2)
+    assert not validate_approval(*generated).ok
+
+
+def test_rewritten_source_head_with_same_content_is_rejected(generated):
+    resolve(generated[0])
+    bids = generated[2]
+    root = git(bids, '-c', 'user.name=Test', '-c', 'user.email=test@example.org',
+               'commit-tree', git(bids, 'rev-parse', 'HEAD^{tree}'), '-m', 'rewritten history')
+    git(bids, 'update-ref', 'HEAD', root)
+    result = seal_approval(*generated)
+    assert not result.ok
+    assert any('ancestor' in error for error in result.errors)
+
+
+def test_generation_timestamp_is_verified_against_stored_commit(generated):
+    resolve(generated[0])
+    data = json.loads(generated[1].read_text())
+    data['generation_timestamp'] = '2000-01-01T00:00:00Z'
+    data['provenance']['source_commit_time'] = data['generation_timestamp']
+    data['generation_metadata_sha256'] = compiler.generation_metadata_digest(data)
+    generated[1].write_text(json.dumps(data))
+    assert not seal_approval(*generated).ok
