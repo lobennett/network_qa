@@ -34,7 +34,7 @@ def func(tmp_path, sub="sub-s03", ses="ses-05"):
 
 def functional(
     task, *, representative_echo=2, observed_echoes=(1, 2, 3),
-    subject="sub-s03", session="ses-05", run="1",
+    subject="sub-s03", session="ses-05", run="1", flags=(),
 ):
     """Build reviewed functional evidence without needing a NIfTI fixture."""
     return FunctionalEvidence(
@@ -47,7 +47,7 @@ def functional(
         original_tr_count=107,
         expected_tr_count_mean=107.0,
         tr_count_fraction=1.0,
-        flags=(),
+        flags=flags,
     )
 
 
@@ -61,8 +61,16 @@ def inspect_fixture(task, fd_mean, fd_perc, tmp_path):
     return motion
 
 
+def report(tmp_path, task="nBack", run="1"):
+    """Create the root-level, acquisition-level MRIQC BOLD report."""
+    path = tmp_path / f"sub-s03_ses-05_task-{task}_run-{run}_bold.html"
+    path.write_text("MRIQC report")
+    return path
+
+
 @pytest.mark.parametrize("task,fd_mean,fd_perc,flagged", [
     ("rest", 0.2, 0.0, True),
+    ("rest", 0.1, 20.0, False),
     ("nBack", 0.2, 0.0, True),
     ("nBack", 0.1, 20.0, True),
     ("nBack", 0.199, 19.9, False),
@@ -78,12 +86,30 @@ def test_inspection_uses_echo_two_and_records_its_report(tmp_path):
     echo_two = func(tmp_path) / "sub-s03_ses-05_task-nBack_run-1_echo-2_bold.json"
     iqm(echo_one, fd_mean=0.1, fd_perc=50.0)
     iqm(echo_two, fd_mean=0.1, fd_perc=0.0)
+    actual_report = report(tmp_path)
 
     motion, = inspect_motion([evidence], tmp_path)
 
     assert motion.fd_perc == 0.0
     assert "excessive_motion" not in motion.flags
-    assert motion.report_path == echo_two.with_suffix(".html")
+    assert motion.report_path == actual_report
+    assert "missing_report" not in motion.flags
+
+
+def test_missing_or_ambiguous_root_level_mriqc_report_is_review_evidence(tmp_path):
+    missing = functional("nBack", run="1")
+    ambiguous = functional("nBack", run="2")
+    iqm(func(tmp_path) / "sub-s03_ses-05_task-nBack_run-1_echo-2_bold.json")
+    iqm(func(tmp_path) / "sub-s03_ses-05_task-nBack_run-2_echo-2_bold.json")
+    report(tmp_path, run="2")
+    report(tmp_path, run="02")
+
+    missing_motion, ambiguous_motion = inspect_motion([missing, ambiguous], tmp_path)
+
+    assert missing_motion.report_path is None
+    assert "missing_report" in missing_motion.flags
+    assert ambiguous_motion.report_path is None
+    assert "ambiguous_report" in ambiguous_motion.flags
 
 
 def test_multi_echo_without_echo_two_is_review_evidence_not_echo_one_fallback(tmp_path):
@@ -97,9 +123,44 @@ def test_multi_echo_without_echo_two_is_review_evidence_not_echo_one_fallback(tm
     assert "excessive_motion" not in motion.flags
 
 
-def test_missing_iqm_and_mismatched_threshold_require_review(tmp_path):
+@pytest.mark.parametrize(
+    "representative_echo,flags",
+    [
+        (None, ()),
+        (1, ()),
+        (2, ("unequal_echo_counts",)),
+        (2, ("invalid_nifti",)),
+        (2, ("ambiguous_echo",)),
+    ],
+)
+def test_untrusted_observed_echo_two_is_not_scored(representative_echo, flags, tmp_path):
+    evidence = functional(
+        "nBack", representative_echo=representative_echo, flags=flags,
+    )
+    iqm(func(tmp_path) / "sub-s03_ses-05_task-nBack_run-1_echo-2_bold.json", fd_perc=50.0)
+
+    motion, = inspect_motion([evidence], tmp_path)
+
+    assert motion.fd_perc is None
+    assert "untrusted_echo_2" in motion.flags
+    assert "missing_echo_2" not in motion.flags
+    assert "excessive_motion" not in motion.flags
+
+
+def test_genuine_single_echo_uses_its_sole_iqm(tmp_path):
+    evidence = functional("nBack", representative_echo=1, observed_echoes=(1,))
+    iqm(func(tmp_path) / "sub-s03_ses-05_task-nBack_run-1_echo-1_bold.json", fd_perc=20.0)
+
+    motion, = inspect_motion([evidence], tmp_path)
+
+    assert motion.fd_perc == 20.0
+    assert "excessive_motion" in motion.flags
+
+
+@pytest.mark.parametrize("fd_thres", [0.2, 0.5000000001])
+def test_missing_iqm_and_mismatched_threshold_require_review(fd_thres, tmp_path):
     missing, mismatch = functional("nBack", run="1"), functional("nBack", run="2")
-    iqm(func(tmp_path) / "sub-s03_ses-05_task-nBack_run-2_echo-2_bold.json", fd_thres=0.2)
+    iqm(func(tmp_path) / "sub-s03_ses-05_task-nBack_run-2_echo-2_bold.json", fd_thres=fd_thres)
 
     missing_motion, mismatched_motion = inspect_motion([missing, mismatch], tmp_path)
 

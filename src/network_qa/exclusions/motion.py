@@ -76,23 +76,25 @@ def inspect_motion(
     metric.  A genuine single-echo acquisition can use its sole representative image.
     """
     candidates = _motion_candidates(mriqc_dir)
+    reports = _motion_reports(mriqc_dir)
     evidence = []
     for functional in sorted(functionals, key=lambda row: row.key):
-        echo = functional.representative_echo
+        report_path, report_flags = _report_evidence(functional.key, reports)
+        echo, echo_flags = _trusted_motion_echo(functional)
         if echo is None:
-            evidence.append(_empty_motion(functional.key, "missing_echo_2"))
+            evidence.append(_empty_motion(functional.key, (*report_flags, *echo_flags), report_path))
             continue
         matches = [
             candidate for candidate in candidates
             if candidate.key == functional.key and candidate.echo == echo
         ]
         if not matches:
-            evidence.append(_empty_motion(functional.key, "missing_iqm"))
+            evidence.append(_empty_motion(functional.key, (*report_flags, "missing_iqm"), report_path))
             continue
         if len(matches) > 1:
-            evidence.append(_empty_motion(functional.key, "ambiguous_iqm"))
+            evidence.append(_empty_motion(functional.key, (*report_flags, "ambiguous_iqm"), report_path))
             continue
-        evidence.append(_read_motion_iqm(matches[0]))
+        evidence.append(_read_motion_iqm(matches[0], report_path, report_flags))
     return tuple(evidence)
 
 
@@ -105,6 +107,70 @@ def _motion_candidates(mriqc_dir: Path) -> tuple[_IqmCandidate, ...]:
         if candidate is not None:
             candidates.append(candidate)
     return tuple(candidates)
+
+
+def _motion_reports(mriqc_dir: Path) -> dict[AcquisitionKey, tuple[Path, ...]]:
+    """Index MRIQC's root-level, acquisition-level BOLD reports.
+
+    MRIQC writes reports at the derivative root and omits the echo entity.  Restricting
+    discovery to that layout prevents an echo IQM's imagined sibling from becoming a
+    report reference.
+    """
+    reports: dict[AcquisitionKey, list[Path]] = {}
+    if not mriqc_dir.is_dir():
+        return {}
+    for path in sorted(mriqc_dir.glob("*_bold.html")):
+        if "_echo-" in path.name:
+            continue
+        candidate = _parse_iqm_candidate(path.with_suffix(".json"))
+        if candidate is not None:
+            reports.setdefault(candidate.key, []).append(path)
+    return {key: tuple(paths) for key, paths in reports.items()}
+
+
+def _report_evidence(
+    key: AcquisitionKey, reports: dict[AcquisitionKey, tuple[Path, ...]],
+) -> tuple[Path | None, tuple[str, ...]]:
+    matches = reports.get(key, ())
+    if not matches:
+        return None, ("missing_report",)
+    if len(matches) > 1:
+        return None, ("ambiguous_report",)
+    return matches[0], ()
+
+
+_UNTRUSTED_FUNCTIONAL_FLAGS = frozenset({
+    "ambiguous_echo", "identity_mismatch", "invalid_nifti", "unequal_echo_counts",
+    "unexpected_echo",
+})
+
+
+def _trusted_motion_echo(functional: FunctionalEvidence) -> tuple[int | None, tuple[str, ...]]:
+    """Validate that the reviewed representative can safely supply motion evidence."""
+    observed = tuple(functional.observed_echoes)
+    observed_set = set(observed)
+    echo_two_observed = 2 in observed_set
+    structurally_ambiguous = len(observed) != len(observed_set)
+    disqualified = (
+        structurally_ambiguous
+        or functional.tr_count is None
+        or bool(_UNTRUSTED_FUNCTIONAL_FLAGS.intersection(functional.flags))
+    )
+
+    if len(observed_set) > 1:
+        if not echo_two_observed:
+            return None, ("missing_echo_2",)
+        if functional.representative_echo != 2 or disqualified:
+            return None, ("untrusted_echo_2",)
+        return 2, ()
+
+    if len(observed_set) == 1:
+        sole_echo, = observed_set
+        if functional.representative_echo == sole_echo and not disqualified:
+            return sole_echo, ()
+        return None, (("untrusted_echo_2",) if echo_two_observed else ("missing_echo_2",))
+
+    return None, ("missing_echo_2",)
 
 
 def _parse_iqm_candidate(path: Path) -> _IqmCandidate | None:
@@ -156,13 +222,16 @@ def _iqm_identity_flags(path: Path, key: AcquisitionKey) -> tuple[str, ...]:
     return ()
 
 
-def _empty_motion(key: AcquisitionKey, flag: str) -> MotionEvidence:
-    return MotionEvidence(key, None, None, None, None, None, (flag,))
+def _empty_motion(
+    key: AcquisitionKey, flags: tuple[str, ...], report_path: Path | None,
+) -> MotionEvidence:
+    return MotionEvidence(key, None, None, None, None, report_path, tuple(sorted(set(flags))))
 
 
-def _read_motion_iqm(candidate: _IqmCandidate) -> MotionEvidence:
-    flags = set(candidate.identity_flags)
-    report_path = candidate.path.with_suffix(".html")
+def _read_motion_iqm(
+    candidate: _IqmCandidate, report_path: Path | None, report_flags: tuple[str, ...],
+) -> MotionEvidence:
+    flags = set((*candidate.identity_flags, *report_flags))
     try:
         iqm = json.loads(candidate.path.read_text())
     except (OSError, json.JSONDecodeError):
@@ -178,11 +247,13 @@ def _read_motion_iqm(candidate: _IqmCandidate) -> MotionEvidence:
     fd_thres = _iqm_fd_thres(iqm)
     if None in (fd_mean, fd_perc, dvars_std, fd_thres) or not 0 <= fd_perc <= 100:
         flags.add("malformed_iqm")
-    if fd_thres is not None and not math.isclose(fd_thres, EXPECTED_FD_THRES,
-                                                 abs_tol=1e-9, rel_tol=0.0):
+    if fd_thres is not None and fd_thres != EXPECTED_FD_THRES:
         flags.add("fd_thres_mismatch")
     if "malformed_iqm" not in flags and "fd_thres_mismatch" not in flags:
-        if (fd_mean >= FD_MEAN_THRESHOLD or fd_perc >= FD_PERCENT_THRESHOLD):
+        high_motion = fd_mean >= FD_MEAN_THRESHOLD
+        if candidate.key.task != "rest":
+            high_motion = high_motion or fd_perc >= FD_PERCENT_THRESHOLD
+        if high_motion:
             flags.add("excessive_motion")
     return MotionEvidence(
         candidate.key, fd_mean, fd_perc, dvars_std, fd_thres, report_path,
