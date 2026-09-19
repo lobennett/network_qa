@@ -33,23 +33,31 @@ class FunctionalEvidence:
 @dataclass(frozen=True)
 class _ObservedImage:
     echo: int
-    tr_count: int
+    tr_count: int | None
+    flags: tuple[str, ...] = ()
 
 
 def inspect_functionals(bids_dir: Path) -> tuple[FunctionalEvidence, ...]:
     """Group BOLD echoes, read dim4, and calculate task-level expected lengths."""
     grouped: dict[AcquisitionKey, list[_ObservedImage]] = defaultdict(list)
-    for path in sorted(bids_dir.glob("sub-*/ses-*/func/*_bold.nii.gz")):
-        key, echo = _functional_identity(path)
-        grouped[key].append(_ObservedImage(echo=echo, tr_count=_tr_count(path)))
+    for path in _bold_paths(bids_dir):
+        key, echo, identity_flags = _functional_identity(path)
+        grouped[key].append(_read_image(path, echo, identity_flags))
 
     preliminary = tuple(_build_evidence(key, images) for key, images in sorted(grouped.items()))
     expected_means = _task_count_means(preliminary)
     return tuple(_with_scan_length_flags(evidence, expected_means) for evidence in preliminary)
 
 
-def _functional_identity(path: Path) -> tuple[AcquisitionKey, int]:
-    filename = path.name.removesuffix(".nii.gz")
+def _bold_paths(bids_dir: Path) -> tuple[Path, ...]:
+    return tuple(sorted(
+        (*bids_dir.glob("sub-*/ses-*/func/*_bold.nii"),
+         *bids_dir.glob("sub-*/ses-*/func/*_bold.nii.gz")),
+    ))
+
+
+def _functional_identity(path: Path) -> tuple[AcquisitionKey, int, tuple[str, ...]]:
+    filename = _nifti_stem(path)
     parts = filename.split("_")
     if not parts or parts[-1] != "bold":
         raise ValueError(f"not a BOLD NIfTI: {path}")
@@ -78,7 +86,18 @@ def _functional_identity(path: Path) -> tuple[AcquisitionKey, int]:
     except KeyError as error:
         raise ValueError(f"missing BIDS entity {error.args[0]!r} in {path}") from error
     echo = _canonical_index(entities.get("echo", "1"), "echo", path)
-    return key, int(echo)
+    flags = ()
+    if (key.subject != path.parents[2].name or key.session != path.parents[1].name):
+        flags = ("identity_mismatch",)
+    return key, int(echo), flags
+
+
+def _nifti_stem(path: Path) -> str:
+    if path.name.endswith(".nii.gz"):
+        return path.name.removesuffix(".nii.gz")
+    if path.name.endswith(".nii"):
+        return path.name.removesuffix(".nii")
+    raise ValueError(f"not a NIfTI: {path}")
 
 
 def _canonical_index(value: str, entity: str, path: Path) -> str:
@@ -87,24 +106,36 @@ def _canonical_index(value: str, entity: str, path: Path) -> str:
     return value.lstrip("0") or "0"
 
 
-def _tr_count(path: Path) -> int:
-    shape = nib.load(str(path)).shape
-    return shape[3] if len(shape) > 3 else 1
+def _read_image(path: Path, echo: int, flags: tuple[str, ...]) -> _ObservedImage:
+    try:
+        shape = nib.load(str(path)).shape
+    except Exception:
+        return _ObservedImage(echo=echo, tr_count=None, flags=(*flags, "invalid_nifti"))
+    if len(shape) != 4 or any(dimension <= 0 for dimension in shape):
+        return _ObservedImage(echo=echo, tr_count=None, flags=(*flags, "invalid_nifti"))
+    return _ObservedImage(echo=echo, tr_count=shape[3], flags=flags)
 
 
 def _build_evidence(key: AcquisitionKey, images: list[_ObservedImage]) -> FunctionalEvidence:
-    counts_by_echo = {image.echo: image.tr_count for image in images}
-    if len(counts_by_echo) != len(images):
-        raise ValueError(f"duplicate echo images for {key}")
-    observed_echoes = tuple(sorted(counts_by_echo))
-    missing_echoes = tuple(echo for echo in EXPECTED_ECHOES if echo not in counts_by_echo)
-    counts_agree = len(set(counts_by_echo.values())) == 1
-    representative_echo, tr_count = _representative_count(counts_by_echo, counts_agree)
-    flags = []
+    observed_echoes = tuple(sorted({image.echo for image in images}))
+    missing_echoes = tuple(echo for echo in EXPECTED_ECHOES if echo not in observed_echoes)
+    duplicate_echo = len(observed_echoes) != len(images)
+    invalid_identity = any("identity_mismatch" in image.flags for image in images)
+    counts = tuple(image.tr_count for image in images)
+    countable = not duplicate_echo and not invalid_identity and all(count is not None for count in counts)
+    counts_agree = countable and len(set(counts)) == 1
+    representative_echo, tr_count = _representative_count(
+        observed_echoes, counts[0] if counts_agree else None,
+    )
+    flags = {flag for image in images for flag in image.flags}
     if missing_echoes:
-        flags.append("missing_echo")
-    if not counts_agree:
-        flags.append("unequal_echo_counts")
+        flags.add("missing_echo")
+    if set(observed_echoes) - set(EXPECTED_ECHOES):
+        flags.add("unexpected_echo")
+    if duplicate_echo:
+        flags.add("ambiguous_echo")
+    if countable and not counts_agree:
+        flags.add("unequal_echo_counts")
     original_tr_count = tr_count + N_DUMMY if tr_count is not None else None
     return FunctionalEvidence(
         key=key,
@@ -116,21 +147,20 @@ def _build_evidence(key: AcquisitionKey, images: list[_ObservedImage]) -> Functi
         original_tr_count=original_tr_count,
         expected_tr_count_mean=None,
         tr_count_fraction=None,
-        flags=tuple(flags),
+        flags=tuple(sorted(flags)),
     )
 
 
 def _representative_count(
-    counts_by_echo: dict[int, int], counts_agree: bool
+    observed_echoes: tuple[int, ...], agreed_count: int | None,
 ) -> tuple[int | None, int | None]:
-    if not counts_agree:
+    if agreed_count is None:
         return None, None
-    if 2 in counts_by_echo:
-        return 2, counts_by_echo[2]
-    if len(counts_by_echo) == 1:
-        echo, count = next(iter(counts_by_echo.items()))
-        return echo, count
-    return None, next(iter(counts_by_echo.values()))
+    if observed_echoes == EXPECTED_ECHOES:
+        return 2, agreed_count
+    if len(observed_echoes) == 1 and observed_echoes[0] != 2:
+        return observed_echoes[0], agreed_count
+    return None, agreed_count
 
 
 def _task_count_means(rows: tuple[FunctionalEvidence, ...]) -> dict[str, float]:
