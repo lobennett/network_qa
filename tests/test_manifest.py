@@ -163,3 +163,31 @@ def test_manifest_is_invariant_to_row_and_semantic_set_order(tmp_path):
 
     assert first_digest == second_digest
     assert first_path.read_bytes() == second_path.read_bytes()
+
+
+@pytest.mark.parametrize("run", ("01", "000", "run-1", "one", "1a"))
+def test_manifest_rejects_noncanonical_functional_run_entities(run):
+    with pytest.raises(ValueError, match="run identity"):
+        functional_key("sub-s01", "ses-01", "nBack", run)
+
+
+def test_manifest_rejects_padded_run_alias_before_duplicate_detection():
+    canonical = functional_key("sub-s01", "ses-01", "nBack", "1")
+
+    assert canonical.run == "1"
+    with pytest.raises(ValueError, match="run identity"):
+        functional_key("sub-s01", "ses-01", "nBack", "01")
+
+
+def test_read_manifest_rejects_padded_run_alias(tmp_path):
+    path = tmp_path / "scan_decisions.tsv"
+    write_manifest(path, [DecisionRow.clean(functional_key("sub-s01", "ses-01", "nBack", "1"))])
+    rows = path.read_text().splitlines()
+    columns = rows[0].split("\t")
+    values = rows[1].split("\t")
+    values[columns.index("run")] = "01"
+    rows[1] = "\t".join(values)
+    path.write_text("\n".join(rows) + "\n")
+
+    with pytest.raises(ValueError, match="run identity"):
+        read_manifest(path)

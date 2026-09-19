@@ -13,6 +13,7 @@ from typing import Iterable, Literal
 RecordType = Literal["acquisition", "missing_expected"]
 Decision = Literal["keep", "drop", "review"]
 _ENTITY_LABEL = re.compile(r"[A-Za-z0-9]+$")
+_RUN_LABEL = re.compile(r"(?:0|[1-9][0-9]*)$")
 
 
 @dataclass(frozen=True, order=True)
@@ -48,7 +49,7 @@ class AcquisitionKey:
         _validate_prefixed_entity("session", self.session, "ses-")
         _validate_optional_entity("acquisition", self.acquisition)
         _validate_optional_entity("direction", self.direction)
-        _validate_optional_entity("run", self.run)
+        _validate_optional_run(self.run)
         _validate_optional_entity("task", self.task)
         if self.datatype == "func" and self.suffix == "bold":
             if not self.task or not self.run:
@@ -338,3 +339,8 @@ def _validate_prefixed_entity(field: str, value: str, prefix: str) -> None:
 def _validate_optional_entity(field: str, value: str) -> None:
     if value and not _ENTITY_LABEL.fullmatch(value):
         raise ValueError(f"{field} identity must be an alphanumeric label")
+
+
+def _validate_optional_run(value: str) -> None:
+    if value and not _RUN_LABEL.fullmatch(value):
+        raise ValueError("run identity must be an unpadded numeric label")
