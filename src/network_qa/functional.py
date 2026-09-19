@@ -124,13 +124,14 @@ def _build_evidence(key: AcquisitionKey, images: list[_ObservedImage]) -> Functi
     counts = tuple(image.tr_count for image in images)
     countable = not duplicate_echo and not invalid_identity and all(count is not None for count in counts)
     counts_agree = countable and len(set(counts)) == 1
+    unexpected_echo = bool(set(observed_echoes) - set(EXPECTED_ECHOES))
     representative_echo, tr_count = _representative_count(
-        observed_echoes, counts[0] if counts_agree else None,
+        observed_echoes, counts[0] if counts_agree else None, unexpected_echo,
     )
     flags = {flag for image in images for flag in image.flags}
     if missing_echoes:
         flags.add("missing_echo")
-    if set(observed_echoes) - set(EXPECTED_ECHOES):
+    if unexpected_echo:
         flags.add("unexpected_echo")
     if duplicate_echo:
         flags.add("ambiguous_echo")
@@ -152,13 +153,13 @@ def _build_evidence(key: AcquisitionKey, images: list[_ObservedImage]) -> Functi
 
 
 def _representative_count(
-    observed_echoes: tuple[int, ...], agreed_count: int | None,
+    observed_echoes: tuple[int, ...], agreed_count: int | None, unexpected_echo: bool,
 ) -> tuple[int | None, int | None]:
-    if agreed_count is None:
+    if agreed_count is None or unexpected_echo:
         return None, None
-    if observed_echoes == EXPECTED_ECHOES:
+    if 2 in observed_echoes:
         return 2, agreed_count
-    if len(observed_echoes) == 1 and observed_echoes[0] != 2:
+    if len(observed_echoes) == 1:
         return observed_echoes[0], agreed_count
     return None, agreed_count
 

@@ -28,6 +28,13 @@ def write_task_counts(bids_dir, task, counts):
         write_bold_group(bids_dir, task=task, run=str(index), echoes={2: count})
 
 
+def write_unreadable_bold(bids_dir, *, task, run="1", echo=1):
+    func = bids_dir / "sub-s01" / "ses-01" / "func"
+    func.mkdir(parents=True, exist_ok=True)
+    name = f"sub-s01_ses-01_task-{task}_run-{run}_echo-{echo}_bold.nii.gz"
+    (func / name).write_bytes(b"not a NIfTI")
+
+
 def test_missing_any_expected_echo_flags_review(tmp_path):
     write_bold_group(tmp_path, task="nBack", echoes={1: 100, 3: 100})
 
@@ -134,6 +141,25 @@ def test_lone_single_echo_is_the_representative_image(tmp_path):
     assert evidence.tr_count == 100
 
 
+def test_lone_echo_two_is_the_representative_image(tmp_path):
+    write_bold_group(tmp_path, task="nBack", echoes={2: 100})
+
+    evidence, = inspect_functionals(tmp_path)
+
+    assert evidence.representative_echo == 2
+    assert evidence.tr_count == 100
+
+
+def test_incomplete_trusted_group_with_echo_two_uses_echo_two(tmp_path):
+    write_bold_group(tmp_path, task="nBack", echoes={1: 100, 2: 100})
+
+    evidence, = inspect_functionals(tmp_path)
+
+    assert evidence.missing_echoes == (3,)
+    assert evidence.representative_echo == 2
+    assert evidence.tr_count == 100
+
+
 def test_incomplete_multi_echo_with_agreed_counts_has_no_echo_two_representative(tmp_path):
     write_bold_group(tmp_path, task="nBack", echoes={1: 100, 3: 100})
 
@@ -182,6 +208,38 @@ def test_malformed_nifti_dimensionality_is_explicit_review_evidence(tmp_path):
 
     assert "invalid_nifti" in evidence.flags
     assert evidence.tr_count is None
+
+
+def test_unreadable_nifti_is_explicit_evidence_and_cannot_affect_task_mean(tmp_path):
+    write_unreadable_bold(tmp_path, task="nBack", run="1")
+    write_bold_group(tmp_path, task="nBack", run="2", echoes={1: 100})
+
+    malformed, valid = inspect_functionals(tmp_path)
+
+    assert "invalid_nifti" in malformed.flags
+    assert malformed.tr_count is None
+    assert malformed.expected_tr_count_mean is None
+    assert valid.expected_tr_count_mean == 107.0
+
+
+def test_five_dimensional_nifti_is_explicit_review_evidence(tmp_path):
+    write_bold_group(tmp_path, task="nBack", echoes={1: 100}, shape_prefix=(2, 2, 2, 2))
+
+    evidence, = inspect_functionals(tmp_path)
+
+    assert "invalid_nifti" in evidence.flags
+    assert evidence.tr_count is None
+    assert evidence.expected_tr_count_mean is None
+
+
+def test_zero_volume_nifti_is_explicit_review_evidence(tmp_path):
+    write_bold_group(tmp_path, task="nBack", echoes={1: 0})
+
+    evidence, = inspect_functionals(tmp_path)
+
+    assert "invalid_nifti" in evidence.flags
+    assert evidence.tr_count is None
+    assert evidence.expected_tr_count_mean is None
 
 
 def test_filename_parent_identity_mismatch_is_explicit_review_evidence(tmp_path):
