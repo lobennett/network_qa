@@ -40,9 +40,23 @@ def _cmd_compile(args: argparse.Namespace) -> None:
 
 
 
+def _cmd_generate(args: argparse.Namespace) -> None:
+    from network_qa.compiler import compile_decisions
+    output = compile_decisions(args.bids_dir, args.mriqc_dir, args.output)
+    print(f"Generated scan decisions -> {output}")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="network-qa", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
+
+    decisions = sub.add_parser("decisions", help="Generate scan-review decisions")
+    decision_commands = decisions.add_subparsers(dest="decision_command", required=True)
+    generate = decision_commands.add_parser("generate", help="Compile imaging and behavioral evidence")
+    generate.add_argument("--bids-dir", type=Path, required=True)
+    generate.add_argument("--mriqc-dir", type=Path, required=True)
+    generate.add_argument("--output", type=Path, required=True)
+    generate.set_defaults(func=_cmd_generate)
 
     # compile
     comp_p = sub.add_parser("compile", help="Run registered generators -> provenance lockfile")

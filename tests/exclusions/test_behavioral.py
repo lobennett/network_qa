@@ -186,3 +186,13 @@ class TestNonmonotonicExclusionRule:
         entries = g.generate("test", config, args)
         assert len(entries) == 1
         assert entries[0]["task"] == "task-stopSignal"
+
+
+def test_rest_requires_no_behavioral_evidence(tmp_path):
+    from types import SimpleNamespace
+    from network_qa.exclusions.behavioral import behavioral_evidence
+    from network_qa.manifest import functional_key
+    rows = behavioral_evidence(tmp_path, [SimpleNamespace(key=functional_key('sub-s01', 'ses-01', 'rest', '1'))])
+    row, = rows
+    assert row.behavioral_status == row.event_status == 'not_applicable'
+    assert not row.flags and row.truncation_metrics == {}

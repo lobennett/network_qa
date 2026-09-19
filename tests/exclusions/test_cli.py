@@ -48,3 +48,15 @@ def test_cli_compile_subset_runs_only_named_generators(tmp_path):
     # The named subset is what ran; unnamed generators contributed nothing.
     assert lock["_meta"]["generators"] == ["behavioral"]
     assert lock["exclusions"] == []
+
+
+def test_decisions_generate_cli(tmp_path):
+    from network_qa.manifest import read_manifest
+    bids, mriqc = tmp_path / 'bids', tmp_path / 'mriqc'
+    (bids / 'sub-s01').mkdir(parents=True)
+    mriqc.mkdir()
+    out = tmp_path / 'scan_decisions.tsv'
+    cli.main(['decisions', 'generate', '--bids-dir', str(bids),
+              '--mriqc-dir', str(mriqc), '--output', str(out)])
+    assert {row.key.suffix for row in read_manifest(out)} == {'T1w', 'T2w'}
+    assert out.with_suffix('.meta.json').is_file()

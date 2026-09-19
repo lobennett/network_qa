@@ -96,3 +96,48 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#setup) for environment setup and test comm
 The [test workflow](.github/workflows/tests.yml) defines the standalone CI checks;
 the [audit record](docs/CODE-REVIEW.md#validation-and-reproduction) records coverage,
 measured results, data-dependent skips and optional consumer integration instructions.
+
+## Scan-review manifests
+
+The review workflow has a separate entry point:
+
+```bash
+network-qa decisions generate --bids-dir <bids> --mriqc-dir <mriqc> \
+    --output <bids>/code/network_fmri/scan_decisions.tsv
+```
+
+This compiles the reviewed functional, motion, and anatomical evidence into one row
+per logical acquisition, plus missing-expected anatomical rows. Every review flag
+sets `decision=review` and `approval_required=yes`. Clean rows default to `keep`;
+no generated row is human-approved. Anatomical recommendations remain nonbinding.
+The legacy `compile` command and its exclusion policy are unchanged.
+
+Canonical behavioral exceptions are read from
+`sourcedata/behavioral/behavioral_exceptions.tsv`. A reviewed absence is evidence,
+not a drop or a reason to require events. For other task runs, missing or unreadable
+behavior, event files, conversion-error tables, and truncation sidecars require
+review. Both nonmonotonic and scan-length trial-loss metrics are retained in the
+metadata's `behavioral_evidence`, keyed by full acquisition identity. Positive trial
+loss requires review; this command applies no automatic behavioral drop threshold.
+
+The `.meta.json` sidecar records the exact manifest SHA-256, resolved input roots,
+BIDS and MRIQC content inventories and their digests, and available source/package
+commits and MRIQC version/input-commit evidence. Unknown provenance is JSON `null`,
+not an inferred commit. The deterministic generation timestamp uses the source
+commit time (or `null`); an orchestrator's milestone receipt owns the wall-clock
+execution time. `approved_manifest_sha256` remains `null` until a separate approval
+workflow seals the decisions.
+
+`compiler.inventory_records` and `compiler.inventory_digest` expose the BIDS
+inventory contract for approval validation. It covers raw subject files, canonical
+sourcedata, `dataset_description.json`, `participants.tsv`, `participants.json`, and
+`.bidsignore`. Derivatives and `code/` are excluded from that digest; MRIQC JSON,
+HTML, and TSV files have a separate inventory. Symlink targets and readable content
+are hashed, and unavailable content is recorded explicitly. Outputs within BIDS
+must be under `code/`, and outputs cannot be placed inside the MRIQC evidence root.
+
+Both outputs are staged before publication. Each replacement is atomic; a caught
+publication failure restores the prior manifest. As two directory entries cannot
+be replaced in a single filesystem operation, readers must verify the metadata's
+manifest digest to detect a process interruption between replacements. Generation
+is a serial workflow stage; concurrent writers are not supported.
