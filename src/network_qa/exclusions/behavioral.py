@@ -243,7 +243,8 @@ def behavioral_evidence(bids_dir: Path, functionals) -> tuple[BehavioralEvidence
     exception_path = behavior_root / 'behavioral_exceptions.tsv'
     errors_path = qc_root / 'conversion_errors.tsv'
     exceptions, exceptions_valid = _evidence_table(
-        exception_path, ('subject', 'session', 'task', 'run', 'reason', 'detail'))
+        exception_path, ('subject', 'session', 'task', 'run', 'reason', 'detail',
+                         'reviewed_by', 'reviewed_at'))
     errors, errors_valid = _evidence_table(
         errors_path, ('subject', 'session', 'task', 'run', 'source_path', 'exception_class', 'message'))
     behavior = _evidence_paths(behavior_root, 'sub-*/ses-*/beh/*_beh.csv', '_beh.csv')

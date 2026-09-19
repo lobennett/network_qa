@@ -29,8 +29,8 @@ def fixture(tmp_path, *, exception=False):
     beh = bids / 'sourcedata/behavioral'
     beh.mkdir(parents=True)
     (beh / 'behavioral_exceptions.tsv').write_text(
-        'subject\tsession\ttask\trun\treason\tdetail\n' +
-        ('sub-s01\tses-01\tnBack\t1\tmissing\treviewed source absence\n' if exception else ''))
+        'subject\tsession\ttask\trun\treason\tdetail\treviewed_by\treviewed_at\n' +
+        ('sub-s01\tses-01\tnBack\t1\tmissing\treviewed source absence\treviewer\t2026-09-18T12:00:00Z\n' if exception else ''))
     qc = bids / 'sourcedata/events_qc'
     qc.mkdir()
     (qc / 'conversion_errors.tsv').write_text(
@@ -249,3 +249,168 @@ def test_source_commit_and_mriqc_provenance_are_retained(tmp_path):
     assert metadata['provenance']['source_datalad_commit'] == source_commit
     assert metadata['provenance']['mriqc_input_commit'] == source_commit
     assert metadata['generation_timestamp'] == git('show', '-s', '--format=%cI', 'HEAD')
+
+
+@pytest.mark.parametrize('root_index,relative', [
+    (0, 'sub-s01'), (0, 'sourcedata'),
+    (0, 'sub-s01/ses-01'), (0, 'sub-s01/ses-01/func'),
+    (0, 'sourcedata/behavioral'), (1, 'sub-s01/ses-01'),
+])
+def test_directory_symlinks_fail_before_inspection_or_publication(tmp_path, monkeypatch, root_index, relative):
+    paths = fixture(tmp_path)
+    directory = paths[root_index] / relative
+    external = tmp_path / 'external-evidence'
+    directory.rename(external)
+    directory.symlink_to(external, target_is_directory=True)
+    def unexpected_inspection(*args):
+        pytest.fail('directory symlink must be rejected before imaging inspection')
+    monkeypatch.setattr(compiler, 'inspect_functionals', unexpected_inspection)
+    with pytest.raises(ValueError, match='directory symlink'):
+        compiler.compile_decisions(*paths)
+    assert not paths[2].exists()
+    assert not paths[2].with_suffix('.meta.json').exists()
+
+
+@pytest.mark.parametrize('root_index', [0, 1])
+def test_evidence_root_directory_symlink_fails_before_inspection_or_publication(tmp_path, monkeypatch, root_index):
+    paths = list(fixture(tmp_path))
+    root = paths[root_index]
+    external = tmp_path / f'external-{root.name}'
+    root.rename(external)
+    root.symlink_to(external, target_is_directory=True)
+    def unexpected_inspection(*args):
+        pytest.fail('evidence root directory symlink must be rejected before inspection')
+    monkeypatch.setattr(compiler, 'inspect_functionals', unexpected_inspection)
+    with pytest.raises(ValueError, match='directory symlink'):
+        compiler.compile_decisions(*paths)
+    assert not paths[2].exists()
+    assert not paths[2].with_suffix('.meta.json').exists()
+
+
+@pytest.mark.parametrize('root_index,pattern,inventory_field', [
+    (0, 'sub-*/ses-*/func/*echo-1_bold.nii.gz', 'inventory'),
+    (1, 'sub-*/ses-*/func/*bold.json', 'mriqc_inventory'),
+])
+@pytest.mark.parametrize('available', [True, False])
+def test_annex_file_symlinks_remain_bound(tmp_path, root_index, pattern, inventory_field, available):
+    paths = fixture(tmp_path)
+    path = next(paths[root_index].glob(pattern))
+    original = path.read_bytes()
+    external = tmp_path / 'annex-object'
+    path.rename(external)
+    path.symlink_to(external)
+    if not available:
+        external.unlink()
+    run(paths)
+    meta = json.loads(paths[2].with_suffix('.meta.json').read_text())
+    record = next(r for r in meta[inventory_field] if r['path'] == path.relative_to(paths[root_index]).as_posix())
+    assert record['symlink'] == str(external)
+    assert record['status'] == ('available' if available else 'unreadable')
+    assert record['sha256'] == (hashlib.sha256(original).hexdigest() if available else None)
+    if root_index == 1 and not available:
+        provenance = meta['provenance']
+        assert provenance['mriqc_input_commit'] is None
+        assert provenance['mriqc_input_commit_coverage'][0]['state'] == 'unreadable'
+
+
+@pytest.mark.parametrize('field', ['reviewed_by', 'reviewed_at'])
+@pytest.mark.parametrize('damage', ['missing_column', 'blank_value'])
+def test_unreviewed_exception_cannot_suppress_missing_evidence(tmp_path, field, damage):
+    import csv
+    import io
+    paths = fixture(tmp_path, exception=True)
+    table = paths[0] / 'sourcedata/behavioral/behavioral_exceptions.tsv'
+    reader = csv.DictReader(io.StringIO(table.read_text()), delimiter='\t')
+    columns = reader.fieldnames
+    row, = list(reader)
+    if damage == 'missing_column':
+        columns.remove(field)
+        row.pop(field)
+    else:
+        row[field] = '   '
+    with table.open('w', newline='') as stream:
+        writer = csv.DictWriter(stream, fieldnames=columns, delimiter='\t')
+        writer.writeheader()
+        writer.writerow(row)
+    row = run(paths)
+    assert row.behavioral_status == 'unknown'
+    assert row.decision == 'review' and row.approval_required and not row.approved
+    assert {'behavioral_evidence_unknown', 'events_unknown', 'truncation_unknown'} <= set(row.flags)
+
+
+@pytest.mark.parametrize('second_commit,state,complete', [
+    (None, 'missing', False), ('b' * 40, 'valid', False),
+    ('a' * 40, 'valid', True), ('shortsha', 'malformed', False),
+    (12, 'malformed', False),
+])
+def test_mriqc_commit_requires_complete_agreeing_iqm_coverage(tmp_path, second_commit, state, complete):
+    paths = fixture(tmp_path)
+    first = next(paths[1].rglob('*bold.json'))
+    data = json.loads(first.read_text())
+    data['provenance']['input_commit'] = 'a' * 40
+    first.write_text(json.dumps(data))
+    # Add a contributing anatomical IQM as well as the functional IQM.
+    image = paths[0] / 'sub-s01/ses-01/anat/sub-s01_ses-01_T1w.nii.gz'
+    image.parent.mkdir()
+    image.write_bytes(b'anatomical inventory')
+    second = paths[1] / 'sub-s01/ses-01/anat/sub-s01_ses-01_T1w.json'
+    second.parent.mkdir()
+    anatomical = dict(cjv=.5, cnr=2, snr_total=10, efc=.4, fber=100, qi_2=.02, wm2max=.7)
+    if second_commit is not None:
+        anatomical['provenance'] = {'input_commit': second_commit}
+    second.write_text(json.dumps(anatomical))
+    (paths[1] / 'sub-s01_ses-01_T1w.html').write_text('report')
+    run(paths)
+    meta_path = paths[2].with_suffix('.meta.json')
+    original = meta_path.read_bytes()
+    provenance = json.loads(original)['provenance']
+    assert provenance['mriqc_input_commit'] == ('a' * 40 if complete else None)
+    assert provenance['mriqc_input_commit_coverage'] == [
+        {'path': second.relative_to(paths[1]).as_posix(), 'state': state,
+         'input_commit': second_commit if state == 'valid' else None},
+        {'path': first.relative_to(paths[1]).as_posix(), 'state': 'valid', 'input_commit': 'a' * 40},
+    ]
+    assert provenance['mriqc_input_commit_conflict'] is (second_commit == 'b' * 40)
+    assert provenance['mriqc_input_commit_candidates'] == (['a' * 40, 'b' * 40] if second_commit == 'b' * 40 else ['a' * 40])
+    run(paths)
+    assert meta_path.read_bytes() == original
+
+
+def test_mriqc_commit_coverage_reports_mixed_present_missing_and_conflicting_iqms(tmp_path):
+    paths = fixture(tmp_path)
+    functional = next(paths[1].rglob('*bold.json'))
+    data = json.loads(functional.read_text())
+    data['provenance']['input_commit'] = 'a' * 40
+    functional.write_text(json.dumps(data))
+    missing = paths[1] / 'sub-s01/ses-01/anat/sub-s01_ses-01_T1w.json'
+    conflicting = paths[1] / 'sub-s01/ses-01/anat/sub-s01_ses-01_T2w.json'
+    missing.parent.mkdir()
+    missing.write_text(json.dumps(dict(cjv=.5, cnr=2, snr_total=10, efc=.4, fber=100, qi_2=.02, wm2max=.7)))
+    conflicting.write_text(json.dumps({'provenance': {'input_commit': 'b' * 40}}))
+    run(paths)
+    provenance = json.loads(paths[2].with_suffix('.meta.json').read_text())['provenance']
+    assert provenance['mriqc_input_commit'] is None
+    assert provenance['mriqc_input_commit_candidates'] == ['a' * 40, 'b' * 40]
+    assert provenance['mriqc_input_commit_conflict'] is True
+    assert provenance['mriqc_input_commit_coverage'] == [
+        {'path': missing.relative_to(paths[1]).as_posix(), 'state': 'missing', 'input_commit': None},
+        {'path': conflicting.relative_to(paths[1]).as_posix(), 'state': 'valid', 'input_commit': 'b' * 40},
+        {'path': functional.relative_to(paths[1]).as_posix(), 'state': 'valid', 'input_commit': 'a' * 40},
+    ]
+
+
+@pytest.mark.parametrize('contents', ['{', '[]', '{"provenance": []}', '{"provenance": {"input_commit": null}}'])
+def test_malformed_iqm_provenance_is_explicit_and_cannot_borrow_dataset_commit(tmp_path, contents):
+    paths = fixture(tmp_path)
+    iqm = next(paths[1].rglob('*bold.json'))
+    iqm.write_text(contents)
+    (paths[1] / 'dataset_description.json').write_text(json.dumps({
+        'provenance': {'input_commit': 'a' * 40},
+    }))
+    run(paths)
+    provenance = json.loads(paths[2].with_suffix('.meta.json').read_text())['provenance']
+    assert provenance['mriqc_input_commit'] is None
+    assert provenance['mriqc_input_commit_candidates'] == []
+    assert provenance['mriqc_input_commit_coverage'] == [{
+        'path': iqm.relative_to(paths[1]).as_posix(), 'state': 'malformed', 'input_commit': None,
+    }]

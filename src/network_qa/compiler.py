@@ -6,6 +6,7 @@ import hashlib
 from importlib.metadata import distribution, version
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -40,7 +41,21 @@ def dataset_subjects(bids_dir: Path) -> tuple[str, ...]:
     return tuple(sorted(subjects))
 
 
+def _reject_directory_symlink(path: Path) -> None:
+    if path.is_symlink() and path.is_dir():
+        raise ValueError(f'evidence directory symlink is not supported: {path}')
+
+
+def _reject_directory_symlinks(root: Path) -> None:
+    # rglob yields directory links without following them. Check the scope root
+    # too: a subject or sourcedata root may itself be linked outside the dataset.
+    _reject_directory_symlink(root)
+    for path in root.rglob('*'):
+        _reject_directory_symlink(path)
+
+
 def _file_record(root: Path, path: Path) -> dict:
+    _reject_directory_symlink(path)
     record = {'path': path.relative_to(root).as_posix()}
     if path.is_symlink():
         record['symlink'] = str(path.readlink())
@@ -64,6 +79,7 @@ def inventory_records(bids_dir: Path) -> list[dict]:
     """
     paths = set()
     for root in [*bids_dir.glob('sub-*'), bids_dir / 'sourcedata']:
+        _reject_directory_symlinks(root)
         if root.is_dir():
             paths.update(path for path in root.rglob('*') if path.is_file() or path.is_symlink())
     for name in ('dataset_description.json', 'participants.tsv', 'participants.json', '.bidsignore'):
@@ -79,6 +95,7 @@ def inventory_digest(records: list[dict]) -> str:
 
 
 def _mriqc_records(mriqc_dir: Path) -> list[dict]:
+    _reject_directory_symlinks(mriqc_dir)
     return [_file_record(mriqc_dir, path) for path in sorted(mriqc_dir.rglob('*'))
             if path.suffix in {'.json', '.html', '.tsv'} and (path.is_file() or path.is_symlink())]
 
@@ -100,26 +117,44 @@ def _dataset_commit(root: Path) -> str | None:
 def _provenance(bids_dir, mriqc_dir):
     package_root = Path(__file__).resolve().parents[2]
     versions = set()
-    input_commits = set()
+    coverage = []
+    # Cover every acquisition IQM in the supplied MRIQC evidence root, including
+    # unused echoes and ambiguous candidates, so no potential contributor is lost.
+    # Dataset descriptions and unrelated JSON cannot establish input provenance.
     for path in sorted(mriqc_dir.rglob('*.json')):
+        record = None
+        if path.name.endswith(('_bold.json', '_T1w.json', '_T2w.json')):
+            record = {'path': path.relative_to(mriqc_dir).as_posix(),
+                      'state': 'malformed', 'input_commit': None}
+            coverage.append(record)
         try:
             data = json.loads(path.read_text(encoding='utf-8'))
             if not isinstance(data, dict):
                 continue
             provenance = data.get('provenance', {})
+            if record is not None and isinstance(provenance, dict):
+                if 'input_commit' not in provenance:
+                    record['state'] = 'missing'
+                else:
+                    candidate = provenance['input_commit']
+                    if isinstance(candidate, str) and re.fullmatch(r'(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})', candidate):
+                        record.update(state='valid', input_commit=candidate.lower())
             if isinstance(provenance, dict):
                 if isinstance(provenance.get('version'), str):
                     versions.add(provenance['version'])
-                if isinstance(provenance.get('input_commit'), str):
-                    input_commits.add(provenance['input_commit'])
             generators = data.get('GeneratedBy', [])
             if isinstance(generators, list):
                 for generator in generators:
                     if isinstance(generator, dict) and str(generator.get('Name', '')).lower() == 'mriqc':
                         if isinstance(generator.get('Version'), str):
                             versions.add(generator['Version'])
-        except (OSError, UnicodeError, ValueError, TypeError):
+        except OSError:
+            if record is not None:
+                record['state'] = 'unreadable'
+        except (UnicodeError, ValueError, TypeError):
             continue
+    input_commits = {record['input_commit'] for record in coverage if record['state'] == 'valid'}
+    complete = bool(coverage) and all(record['state'] == 'valid' for record in coverage)
     package_commit = _dataset_commit(package_root)
     package_dirty = bool(_git(package_root, 'status', '--porcelain')) if package_commit else None
     if package_commit is None:
@@ -137,8 +172,11 @@ def _provenance(bids_dir, mriqc_dir):
         'source_datalad_commit': commit,
         'source_commit_time': _git(bids_dir, 'show', '-s', '--format=%cI', 'HEAD') if commit else None,
         'mriqc_dataset_commit': _dataset_commit(mriqc_dir),
-        'mriqc_input_commit': next(iter(input_commits)) if len(input_commits) == 1 else None,
+        'mriqc_input_commit': next(iter(input_commits)) if complete and len(input_commits) == 1 else None,
         'mriqc_input_commit_candidates': sorted(input_commits),
+        'mriqc_input_commit_coverage': coverage,
+        'mriqc_input_commit_coverage_scope': 'all-acquisition-iqms-in-mriqc-root',
+        'mriqc_input_commit_conflict': len(input_commits) > 1,
         'mriqc_versions': sorted(versions),
         'package_commits': {'network_qa': package_commit},
         'package_versions': {'network_qa': version('network_qa')},
@@ -170,7 +208,10 @@ def _publish_pair(output: Path, manifest: Path, metadata: Path) -> None:
 
 def compile_decisions(bids_dir: Path, mriqc_dir: Path, output: Path) -> Path:
     """Generate unapproved decisions and deterministic, explicitly unsealed metadata."""
-    bids_dir, mriqc_dir, output = Path(bids_dir).resolve(), Path(mriqc_dir).resolve(), Path(output).absolute()
+    bids_dir, mriqc_dir, output = Path(bids_dir), Path(mriqc_dir), Path(output).absolute()
+    _reject_directory_symlink(bids_dir)
+    _reject_directory_symlink(mriqc_dir)
+    bids_dir, mriqc_dir = bids_dir.resolve(), mriqc_dir.resolve()
     if not bids_dir.is_dir() or not mriqc_dir.is_dir():
         raise ValueError('BIDS and MRIQC inputs must be existing directories')
     if output.suffix != '.tsv':
