@@ -4,4 +4,5 @@ __pycache__/
 .venv/
 .uv-cache/
 *.egg-info/
+.worktrees/
 # venv + cache on $SCRATCH
