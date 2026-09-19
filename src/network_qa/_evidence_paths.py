@@ -12,6 +12,17 @@ _VCS_ADMINISTRATION = frozenset({
 })
 
 
+def valid_report(path: Path) -> bool:
+    """Accept a readable nonempty regular report target, including annex symlinks."""
+    try:
+        if not path.is_file() or path.stat().st_size <= 0:
+            return False
+        with path.open("rb") as handle:
+            return bool(handle.read(1))
+    except OSError:
+        return False
+
+
 def is_vcs_administration_path(relative: Path) -> bool:
     """Use the same exclusion for filesystem inventory and committed Git paths."""
     return bool(_VCS_ADMINISTRATION.intersection(relative.parts))

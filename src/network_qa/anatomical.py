@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import hashlib
 import json
 import math
 from pathlib import Path
 from typing import Iterable
 
 from network_qa.manifest import AcquisitionKey
-from network_qa._evidence_paths import iter_evidence_files
+from network_qa._evidence_paths import iter_evidence_files, valid_report
 
 
 METRIC_NAMES = ("cjv", "cnr", "snr", "efc", "fber", "qi_2", "wm2max")
@@ -103,10 +104,28 @@ def _image_candidates(bids_dir: Path) -> tuple[_ImageCandidate, ...]:
                     *bids_dir.glob("sub-*/ses-*/anat/*_T2w.nii"),
                     *bids_dir.glob("sub-*/ses-*/anat/*_T2w.nii.gz")))
     candidates = []
+    invalid_paths = []
     for path in paths:
         candidate = _parse_candidate(path, _nifti_stem(path))
-        if candidate is not None:
+        if candidate is None:
+            invalid_paths.append(path)
+        else:
             candidates.append(_physical_image_candidate(candidate))
+    # Reserve every trusted identity before allocating deterministic observation
+    # keys. A malformed filename must never disappear or alias a valid image.
+    occupied = {candidate.key for candidate in candidates}
+    for path in invalid_paths:
+        acquisition = "invalid" + hashlib.sha256(path.relative_to(bids_dir).as_posix().encode()).hexdigest()
+        while True:
+            key = AcquisitionKey(
+                "acquisition", path.parents[2].name, path.parents[1].name, "anat",
+                _nifti_stem(path).split("_")[-1], acquisition=acquisition,
+            )
+            if key not in occupied:
+                break
+            acquisition += "x"
+        occupied.add(key)
+        candidates.append(_ImageCandidate(path, key, ("invalid_identity", "untrusted_identity")))
     return tuple(candidates)
 
 
@@ -160,19 +179,8 @@ def _mriqc_reports(mriqc_dir: Path) -> dict[AcquisitionKey, tuple[_ReportCandida
     for path in sorted((*mriqc_dir.glob("*_T1w.html"), *mriqc_dir.glob("*_T2w.html"))):
         parsed = _parse_candidate(path, path.name.removesuffix(".html"))
         if parsed is not None:
-            reports[parsed.key].append(_ReportCandidate(path, _valid_report(path)))
+            reports[parsed.key].append(_ReportCandidate(path, valid_report(path)))
     return {key: tuple(paths) for key, paths in reports.items()}
-
-
-def _valid_report(path: Path) -> bool:
-    """Accept a readable nonempty regular report target, including annex symlinks."""
-    try:
-        if not path.is_file() or path.stat().st_size <= 0:
-            return False
-        with path.open("rb") as handle:
-            return bool(handle.read(1))
-    except OSError:
-        return False
 
 
 def _parse_candidate(path: Path, stem: str) -> _ImageCandidate | None:
@@ -182,7 +190,7 @@ def _parse_candidate(path: Path, stem: str) -> _ImageCandidate | None:
     entities: dict[str, str] = {}
     for part in parts[:-1]:
         name, separator, value = part.partition("-")
-        if not separator or not value or name in entities:
+        if not separator or not value or name in entities or name not in {"sub", "ses", "acq", "run"}:
             return None
         entities[name] = value
     try:

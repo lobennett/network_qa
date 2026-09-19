@@ -133,9 +133,10 @@ def test_multi_echo_without_echo_two_is_review_evidence_not_echo_one_fallback(tm
         (2, ("ambiguous_echo",)),
     ],
 )
-def test_untrusted_observed_echo_two_is_not_scored(representative_echo, flags, tmp_path):
+@pytest.mark.parametrize("observed_echoes", [(2,), (1, 2), (2, 3), (1, 2, 3)])
+def test_untrusted_observed_echo_two_is_not_scored(representative_echo, flags, observed_echoes, tmp_path):
     evidence = functional(
-        "nBack", representative_echo=representative_echo, flags=flags,
+        "nBack", representative_echo=representative_echo, flags=flags, observed_echoes=observed_echoes,
     )
     iqm(func(tmp_path) / "sub-s03_ses-05_task-nBack_run-1_echo-2_bold.json", fd_perc=50.0)
 
@@ -147,14 +148,89 @@ def test_untrusted_observed_echo_two_is_not_scored(representative_echo, flags, t
     assert "excessive_motion" not in motion.flags
 
 
-def test_genuine_single_echo_uses_its_sole_iqm(tmp_path):
-    evidence = functional("nBack", representative_echo=1, observed_echoes=(1,))
-    iqm(func(tmp_path) / "sub-s03_ses-05_task-nBack_run-1_echo-1_bold.json", fd_perc=20.0)
+@pytest.mark.parametrize("observed", [(1,), (2,), (3,), (1, 2), (2, 3), (1, 3)])
+def test_incomplete_study_echo_groups_only_use_observed_trusted_echo_two(tmp_path, observed):
+    representative = 2 if 2 in observed else (observed[0] if len(observed) == 1 else None)
+    evidence = functional("nBack", representative_echo=representative, observed_echoes=observed,
+                          flags=("missing_echo",))
+    # Even available MRIQC output cannot establish that a missing BIDS echo exists.
+    for echo in (1, 2, 3):
+        iqm(func(tmp_path) / f"sub-s03_ses-05_task-nBack_run-1_echo-{echo}_bold.json", fd_perc=20.0)
 
     motion, = inspect_motion([evidence], tmp_path)
 
-    assert motion.fd_perc == 20.0
-    assert "excessive_motion" in motion.flags
+    if 2 in observed:
+        assert motion.fd_perc == 20.0
+        assert "excessive_motion" in motion.flags
+    else:
+        assert (motion.fd_mean, motion.fd_perc, motion.dvars_std, motion.fd_thres) == (None,) * 4
+        assert "missing_echo_2" in motion.flags
+        assert "excessive_motion" not in motion.flags
+    assert evidence.tr_count == 100
+
+
+@pytest.mark.parametrize("kind", ["empty", "directory", "broken_symlink", "unreadable", "valid_symlink"])
+def test_motion_report_validity_requires_readable_nonempty_file(tmp_path, kind):
+    evidence = functional("nBack")
+    iqm(func(tmp_path) / "sub-s03_ses-05_task-nBack_run-1_echo-2_bold.json")
+    path = tmp_path / "sub-s03_ses-05_task-nBack_run-1_bold.html"
+    if kind == "directory":
+        path.mkdir()
+    elif kind in {"broken_symlink", "valid_symlink"}:
+        target = tmp_path / "annex-content"
+        if kind == "valid_symlink":
+            target.write_text("report content")
+        path.symlink_to(target)
+    else:
+        path.write_text("" if kind == "empty" else "report content")
+        if kind == "unreadable":
+            path.chmod(0)
+    try:
+        motion, = inspect_motion([evidence], tmp_path)
+    finally:
+        if kind == "unreadable":
+            path.chmod(0o644)
+    assert motion.fd_mean == .05
+    if kind == "valid_symlink":
+        assert motion.report_path == path and not motion.flags
+    else:
+        assert motion.report_path is None and "invalid_report" in motion.flags
+
+
+@pytest.mark.parametrize("metric", ["fd_mean", "fd_perc", "dvars_std", "fd_thres"])
+@pytest.mark.parametrize("value", [-1, True, "0.1", [], {}, None, float("nan"), float("inf"), 10 ** 400],
+                         ids=["negative", "boolean", "string", "list", "object", "missing", "nan", "inf", "huge"])
+def test_invalid_motion_metrics_withhold_all_values(tmp_path, metric, value):
+    evidence = functional("nBack")
+    iqm(func(tmp_path) / "sub-s03_ses-05_task-nBack_run-1_echo-2_bold.json", **{metric: value})
+    motion, = inspect_motion([evidence], tmp_path)
+    assert "malformed_iqm" in motion.flags
+    assert (motion.fd_mean, motion.fd_perc, motion.dvars_std, motion.fd_thres) == (None,) * 4
+    assert "excessive_motion" not in motion.flags
+
+
+@pytest.mark.parametrize("payload", [b"\xff", b"{", b"[]", b'{"fd_mean":' + b"9" * 5000 + b"}"],
+                         ids=["invalid_utf8", "invalid_json", "array", "integer_digit_limit"])
+def test_unreadable_or_unparseable_motion_iqm_is_malformed_evidence(tmp_path, payload):
+    evidence = functional("nBack")
+    path = func(tmp_path) / "sub-s03_ses-05_task-nBack_run-1_echo-2_bold.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(payload)
+    motion, = inspect_motion([evidence], tmp_path)
+    assert "malformed_iqm" in motion.flags
+    assert (motion.fd_mean, motion.fd_perc, motion.dvars_std, motion.fd_thres) == (None,) * 4
+
+
+@pytest.mark.parametrize("fd_perc,malformed", [(0, False), (100, False), (100.1, True)])
+def test_motion_metric_domains_include_zero_and_percent_endpoints(tmp_path, fd_perc, malformed):
+    iqm(func(tmp_path) / "sub-s03_ses-05_task-nBack_run-1_echo-2_bold.json",
+        fd_mean=0, fd_perc=fd_perc, dvars_std=0)
+    motion, = inspect_motion([functional("nBack")], tmp_path)
+    assert ("malformed_iqm" in motion.flags) is malformed
+    if malformed:
+        assert (motion.fd_mean, motion.fd_perc, motion.dvars_std, motion.fd_thres) == (None,) * 4
+    else:
+        assert (motion.fd_mean, motion.fd_perc, motion.dvars_std, motion.fd_thres) == (0, fd_perc, 0, .5)
 
 
 @pytest.mark.parametrize("fd_thres", [0.2, 0.5000000001])

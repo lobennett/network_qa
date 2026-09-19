@@ -374,3 +374,61 @@ def test_wrong_or_nonfinite_metric_types_are_malformed_evidence(tmp_path, bad_va
     t1w_row, = [row for row in rows if row.key.suffix == "T1w"]
 
     assert "malformed_iqm" in t1w_row.flags
+
+
+@pytest.mark.parametrize("filename", [
+    "sub-s01_ses-01_run-bad_T1w.nii.gz",
+    "sub-s01_ses-01_task-rest_run-2_T1w.nii.gz",
+    "sub-s01_ses-01_dir-AP_run-2_T1w.nii.gz",
+    "sub-s01_ses-01_unknown-value_run-2_T1w.nii",
+    "sub-s01_ses-01_run-2_run-3_T1w.nii.gz",
+    "sub-s01_ses-01_acq-bad-label_run-2_T1w.nii.gz",
+    "sub-s01_ses-01_broken_T1w.nii.gz",
+    "unidentified_T1w.nii.gz",
+])
+def test_malformed_anatomical_identity_remains_an_untrusted_physical_observation(tmp_path, filename):
+    bids, mriqc = tmp_path / "bids", tmp_path / "mriqc"
+    valid = write_anatomical(bids, suffix="T1w")
+    t2w = write_anatomical(bids, suffix="T2w")
+    for image in (valid, t2w):
+        write_iqm(mriqc, image, **valid_metrics())
+        write_report(mriqc, image)
+    (valid.parent / filename).write_bytes(b"malformed physical observation")
+
+    rows = inspect_anatomicals(bids, mriqc, ["sub-s01"])
+    t1w = [row for row in rows if row.key.suffix == "T1w"]
+    assert len(t1w) == 2
+    invalid, = [row for row in t1w if "invalid_identity" in row.flags]
+    assert (invalid.key.subject, invalid.key.session, invalid.key.record_type) == (
+        "sub-s01", "ses-01", "acquisition",
+    )
+    assert {"invalid_identity", "untrusted_identity", "anatomical_count"} <= set(invalid.flags)
+    assert invalid.report_path is None and all(value is None for value in invalid.metrics.values())
+    assert all("anatomical_count" in row.flags and not row.recommendation for row in t1w)
+    assert all(row.recommendation_status == "indeterminate" for row in t1w)
+    assert rows == inspect_anatomicals(bids, mriqc, ["sub-s01"])
+
+
+def test_malformed_observation_keys_are_unique_and_cannot_collide_with_valid_acquisitions(tmp_path):
+    bids, mriqc = tmp_path / "bids", tmp_path / "mriqc"
+    malformed = write_anatomical(bids, suffix="T1w", run="bad")
+    write_anatomical(bids, suffix="T1w", run="bad", extension=".nii")
+    write_anatomical(bids, suffix="T1w", run="worse")
+    rows = inspect_anatomicals(bids, mriqc, ["sub-s01"])
+    invalid = [row for row in rows if "invalid_identity" in row.flags]
+    assert len(invalid) == 3
+    assert len({row.key for row in rows}) == len(rows)
+    key = invalid[0].key
+    valid = write_anatomical(bids, suffix="T1w", acquisition=key.acquisition, run=key.run)
+    assert valid != malformed
+    write_iqm(mriqc, valid, **valid_metrics())
+    write_report(mriqc, valid)
+
+    rows = inspect_anatomicals(bids, mriqc, ["sub-s01"])
+    assert len([row for row in rows if row.key.suffix == "T1w"]) == 4
+    assert len({row.key for row in rows}) == len(rows)
+    valid_row, = [row for row in rows if row.key == key]
+    assert "untrusted_identity" not in valid_row.flags
+    assert valid_row.metrics["cjv"] == .5
+    assert all(not row.recommendation for row in rows)
+    assert rows == inspect_anatomicals(bids, mriqc, ["sub-s01"])

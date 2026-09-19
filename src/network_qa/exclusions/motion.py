@@ -38,7 +38,7 @@ from network_qa.exclusions.base import (
     load_dataset_subjects, register_generator, run_entity, validate_number,
 )
 from network_qa.functional import FunctionalEvidence
-from network_qa._evidence_paths import iter_evidence_files
+from network_qa._evidence_paths import iter_evidence_files, valid_report
 from network_qa.manifest import AcquisitionKey
 
 
@@ -73,8 +73,8 @@ def inspect_motion(
 ) -> tuple[MotionEvidence, ...]:
     """Read trusted MRIQC IQMs and flag reviewable motion evidence problems.
 
-    A multi-echo group without trusted echo 2 deliberately receives no substitute
-    metric.  A genuine single-echo acquisition can use its sole representative image.
+    The study expects echoes 1, 2, and 3. Without trusted observed echo 2, a group
+    deliberately receives no substitute metric, even if only one image was found.
     """
     candidates = _motion_candidates(mriqc_dir)
     reports = _motion_reports(mriqc_dir)
@@ -135,6 +135,8 @@ def _report_evidence(
     matches = reports.get(key, ())
     if not matches:
         return None, ("missing_report",)
+    if any(not valid_report(path) for path in matches):
+        return None, ("invalid_report",)
     if len(matches) > 1:
         return None, ("ambiguous_report",)
     return matches[0], ()
@@ -158,20 +160,11 @@ def _trusted_motion_echo(functional: FunctionalEvidence) -> tuple[int | None, tu
         or bool(_UNTRUSTED_FUNCTIONAL_FLAGS.intersection(functional.flags))
     )
 
-    if len(observed_set) > 1:
-        if not echo_two_observed:
-            return None, ("missing_echo_2",)
-        if functional.representative_echo != 2 or disqualified:
-            return None, ("untrusted_echo_2",)
-        return 2, ()
-
-    if len(observed_set) == 1:
-        sole_echo, = observed_set
-        if functional.representative_echo == sole_echo and not disqualified:
-            return sole_echo, ()
-        return None, (("untrusted_echo_2",) if echo_two_observed else ("missing_echo_2",))
-
-    return None, ("missing_echo_2",)
+    if not echo_two_observed:
+        return None, ("missing_echo_2",)
+    if functional.representative_echo != 2 or disqualified:
+        return None, ("untrusted_echo_2",)
+    return 2, ()
 
 
 def _parse_iqm_candidate(path: Path) -> _IqmCandidate | None:
@@ -235,7 +228,7 @@ def _read_motion_iqm(
     flags = set((*candidate.identity_flags, *report_flags))
     try:
         iqm = json.loads(candidate.path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, ValueError):
         return MotionEvidence(candidate.key, None, None, None, None, report_path,
                               tuple(sorted((*flags, "malformed_iqm"))))
     if not isinstance(iqm, dict):
@@ -246,8 +239,10 @@ def _read_motion_iqm(
     fd_perc = _finite_number(iqm.get("fd_perc"))
     dvars_std = _finite_number(iqm.get("dvars_std"))
     fd_thres = _iqm_fd_thres(iqm)
-    if None in (fd_mean, fd_perc, dvars_std, fd_thres) or not 0 <= fd_perc <= 100:
+    values = (fd_mean, fd_perc, dvars_std, fd_thres)
+    if any(value is None or value < 0 for value in values) or fd_perc > 100:
         flags.add("malformed_iqm")
+        return _empty_motion(candidate.key, tuple(flags), report_path)
     if fd_thres is not None and fd_thres != EXPECTED_FD_THRES:
         flags.add("fd_thres_mismatch")
     if "malformed_iqm" not in flags and "fd_thres_mismatch" not in flags:
@@ -274,7 +269,10 @@ def _iqm_fd_thres(iqm: dict) -> float | None:
 def _finite_number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
     return number if math.isfinite(number) else None
 
 ENTITIES = re.compile(

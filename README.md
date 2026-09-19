@@ -114,6 +114,23 @@ sets `decision=review` and `approval_required=yes`. Clean rows default to `keep`
 no generated row is human-approved. Anatomical recommendations remain nonbinding.
 The legacy `compile` command and its exclusion policy are unchanged.
 
+The study expects echoes 1, 2, and 3. Motion values require an observed, trusted
+echo 2, including in incomplete groups; a lone echo 1 or 3 supplies only volume-count
+evidence. Malformed motion IQMs retain the acquisition with `malformed_iqm` and no
+usable motion values. MRIQC reports must be readable, nonempty regular files;
+symlinks to such files remain valid. Invalid reports require review and contribute
+no report path.
+
+Anatomical files with malformed or unsupported identity entities remain explicit
+observations under their physical subject/session parent and T1w/T2w suffix. Their
+synthetic acquisition label is `invalid` plus the SHA-256 of the BIDS-relative file
+path, with `x` appended as needed to avoid any observed acquisition-key collision.
+Each malformed physical path counts toward anatomical review, including distinct
+`.nii` and `.nii.gz` paths. These rows carry `invalid_identity`,
+`untrusted_identity`, and `anatomical_count`; they cannot supply MRIQC evidence or
+a selection recommendation. An invalid physical subject/session parent stops
+compilation because it cannot support a manifest identity.
+
 Canonical behavioral exceptions are read from
 `sourcedata/behavioral/behavioral_exceptions.tsv`. A reviewed absence is evidence,
 not a drop or a reason to require events. Exception rows require nonempty

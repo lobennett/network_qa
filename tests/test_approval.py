@@ -13,7 +13,7 @@ from network_qa import compiler
 from network_qa.approval import seal_approval, validate_approval
 from network_qa.cli import main
 from network_qa.manifest import read_manifest, write_manifest
-from test_compiler import fixture as evidence_fixture
+from test_compiler import STEM, fixture as evidence_fixture
 
 _REAL_COMPILER_GIT = compiler._git
 
@@ -69,6 +69,89 @@ def test_review_row_blocks_approval(generated):
     result = seal_approval(*generated)
     assert not result.ok
     assert any('unresolved review' in error for error in result.errors)
+
+
+@pytest.mark.parametrize('case,flag', [
+    ('anatomical_run', 'invalid_identity'),
+    ('anatomical_task', 'invalid_identity'),
+    ('anatomical_entity', 'invalid_identity'),
+    ('anatomical_filename', 'invalid_identity'),
+    ('report_empty', 'invalid_report'),
+    ('report_directory', 'invalid_report'),
+    ('report_broken_link', 'invalid_report'),
+    ('iqm_utf8', 'malformed_iqm'),
+    ('iqm_huge', 'malformed_iqm'),
+    ('iqm_negative', 'malformed_iqm'),
+    ('iqm_boolean', 'malformed_iqm'),
+    ('echo_1', 'missing_echo_2'),
+    ('echo_2', 'missing_echo'),
+    ('echo_3', 'missing_echo_2'),
+    ('echo_1_3', 'missing_echo_2'),
+])
+def test_compilation_retains_invalid_evidence_and_approval_requires_its_review(generated, case, flag):
+    manifest, metadata, bids = generated
+    mriqc = Path(json.loads(metadata.read_text())['input_roots']['mriqc_dir'])
+    iqm = next(mriqc.rglob('*_bold.json'))
+    data = json.loads(iqm.read_text())
+    if case.startswith('anatomical_'):
+        anat = bids / 'sub-s01/ses-01/anat'
+        anat.mkdir()
+        (anat / 'sub-s01_ses-01_run-1_T1w.nii.gz').write_bytes(b'valid inventory')
+        malformed = {
+            'anatomical_run': 'sub-s01_ses-01_run-bad_T1w.nii.gz',
+            'anatomical_task': 'sub-s01_ses-01_task-rest_run-2_T1w.nii.gz',
+            'anatomical_entity': 'sub-s01_ses-01_unknown-value_run-2_T1w.nii.gz',
+            'anatomical_filename': 'unidentified_T1w.nii.gz',
+        }[case]
+        (anat / malformed).write_bytes(b'invalid inventory identity')
+    elif case.startswith('report_'):
+        report = mriqc / f'{STEM}_bold.html'
+        report.unlink()
+        if case == 'report_empty':
+            report.write_text('')
+        elif case == 'report_directory':
+            report.mkdir()
+        else:
+            report.symlink_to(mriqc / 'unavailable.html')
+    elif case.startswith('echo_'):
+        observed = {int(value) for value in case.removeprefix('echo_').split('_')}
+        for echo in {1, 2, 3} - observed:
+            (bids / 'sub-s01/ses-01/func' / f'{STEM}_echo-{echo}_bold.nii.gz').unlink()
+    elif case != 'iqm_utf8':
+        data['fd_mean'] = {'iqm_huge': 10 ** 400, 'iqm_negative': -1, 'iqm_boolean': True}[case]
+    # Bind the mutated raw inputs to a real source commit, so review is tested
+    # independently of uncommitted-input rejection.
+    data['provenance']['input_commit'] = save(bids, 'final-review regression inputs')
+    if case == 'iqm_utf8':
+        iqm.write_bytes(b'\xff')
+    else:
+        iqm.write_text(json.dumps(data))
+    compiler.compile_decisions(bids, mriqc, manifest)
+    rows = read_manifest(manifest)
+    affected = {row.key: row for row in rows if flag in row.flags}
+    assert affected, (case, rows)
+    assert all(row.decision == 'review' and row.approval_required and not row.approved
+               for row in affected.values())
+    if case.startswith('anatomical_'):
+        anatomy = [row for row in rows if row.key.suffix == 'T1w']
+        assert len(anatomy) == 2
+        assert all('anatomical_count' in row.flags and not row.recommendation for row in anatomy)
+    else:
+        row, = affected.values()
+        if case.startswith('report_'):
+            assert row.mriqc_report_path == ''
+        elif case == 'echo_2':
+            assert row.fd_mean == .1
+        else:
+            assert (row.fd_mean, row.fd_perc, row.dvars_std, row.fd_thres) == (None,) * 4
+        assert row.tr_count == 20 and row.original_tr_count == 27
+    # Resolve every other flag; only the finding's affected rows stay unresolved.
+    resolve(manifest)
+    write_manifest(manifest, [affected.get(row.key, row) for row in read_manifest(manifest)])
+    before = metadata.read_bytes()
+    result = seal_approval(*generated)
+    assert not result.ok and any('unresolved review' in error for error in result.errors), result.errors
+    assert metadata.read_bytes() == before
 
 
 def test_seal_records_checksum_and_only_changes_metadata_approval_fields(generated):
