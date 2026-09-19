@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Literal
@@ -11,6 +12,7 @@ from typing import Iterable, Literal
 
 RecordType = Literal["acquisition", "missing_expected"]
 Decision = Literal["keep", "drop", "review"]
+_ENTITY_LABEL = re.compile(r"[A-Za-z0-9]+$")
 
 
 @dataclass(frozen=True, order=True)
@@ -30,8 +32,33 @@ class AcquisitionKey:
     def __post_init__(self) -> None:
         if self.record_type not in {"acquisition", "missing_expected"}:
             raise ValueError(f"invalid record type: {self.record_type!r}")
-        if not all((self.subject, self.datatype, self.suffix)):
-            raise ValueError("acquisition identity requires subject, datatype, and suffix")
+        _validate_prefixed_entity("subject", self.subject, "sub-")
+        if self.record_type == "missing_expected":
+            self._validate_missing_expected()
+        else:
+            self._validate_observed_acquisition()
+
+    def _validate_missing_expected(self) -> None:
+        if self.datatype != "anat" or self.suffix not in {"T1w", "T2w"}:
+            raise ValueError("missing-expected identity must be anatomical T1w or T2w")
+        if any((self.session, self.task, self.acquisition, self.direction, self.run)):
+            raise ValueError("missing-expected identity must not contain BIDS acquisition entities")
+
+    def _validate_observed_acquisition(self) -> None:
+        _validate_prefixed_entity("session", self.session, "ses-")
+        _validate_optional_entity("acquisition", self.acquisition)
+        _validate_optional_entity("direction", self.direction)
+        _validate_optional_entity("run", self.run)
+        _validate_optional_entity("task", self.task)
+        if self.datatype == "func" and self.suffix == "bold":
+            if not self.task or not self.run:
+                raise ValueError("functional acquisition identity requires task and run")
+            return
+        if self.datatype == "anat" and self.suffix in {"T1w", "T2w"}:
+            if self.task or self.direction:
+                raise ValueError("anatomical acquisition identity must not contain task or direction")
+            return
+        raise ValueError("observed acquisition identity must be functional BOLD or anatomical T1w/T2w")
 
 
 @dataclass(frozen=True)
@@ -76,6 +103,8 @@ class DecisionRow:
     def __post_init__(self) -> None:
         if self.decision not in {"keep", "drop", "review"}:
             raise ValueError(f"invalid decision: {self.decision!r}")
+        for field in ("expected_echoes", "observed_echoes", "missing_echoes", "flags"):
+            object.__setattr__(self, field, tuple(sorted(set(getattr(self, field)))))
 
     @classmethod
     def clean(cls, key: AcquisitionKey) -> DecisionRow:
@@ -299,3 +328,13 @@ def _parse_bool(value: str) -> bool:
     if value == "no":
         return False
     raise ValueError(f"boolean must be 'yes' or 'no', got {value!r}")
+
+
+def _validate_prefixed_entity(field: str, value: str, prefix: str) -> None:
+    if not value.startswith(prefix) or not _ENTITY_LABEL.fullmatch(value.removeprefix(prefix)):
+        raise ValueError(f"{field} identity must use {prefix}<alphanumeric-label>")
+
+
+def _validate_optional_entity(field: str, value: str) -> None:
+    if value and not _ENTITY_LABEL.fullmatch(value):
+        raise ValueError(f"{field} identity must be an alphanumeric label")

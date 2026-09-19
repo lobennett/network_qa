@@ -1,3 +1,4 @@
+import hashlib
 from dataclasses import replace
 
 import pytest
@@ -97,3 +98,68 @@ def test_manifest_round_trips_missing_expected_subject_modality_row(tmp_path):
     write_manifest(path, [row])
 
     assert read_manifest(path) == (row,)
+
+
+@pytest.mark.parametrize(
+    "key_args",
+    (
+        ("acquisition", "s01", "ses-01", "anat", "T1w"),
+        ("acquisition", "sub-s01", "session-01", "anat", "T1w"),
+        ("acquisition", "sub-s01", "ses-01", "func", "bold", "nBack"),
+        ("acquisition", "sub-s01", "ses-01", "func", "T1w", "nBack", "", "", "1"),
+        ("missing_expected", "sub-s01", "", "func", "bold"),
+        ("missing_expected", "sub-s01", "ses-01", "anat", "T2w"),
+    ),
+)
+def test_manifest_rejects_noncanonical_or_contradictory_identities(key_args):
+    with pytest.raises(ValueError, match="identity"):
+        DecisionRow.clean(AcquisitionKey(*key_args))
+
+
+def test_manifest_rejects_subject_alias_before_duplicate_detection():
+    with pytest.raises(ValueError, match="subject identity"):
+        AcquisitionKey("acquisition", "s01", "ses-01", "func", "bold", task="nBack", run="1")
+
+
+def test_manifest_rejects_duplicate_acquisitions_while_reading(tmp_path):
+    path = tmp_path / "scan_decisions.tsv"
+    write_manifest(path, [DecisionRow.clean(functional_key("sub-s01", "ses-01", "nBack", "1"))])
+    contents = path.read_text()
+    path.write_text(contents + contents.splitlines()[1] + "\n")
+
+    with pytest.raises(ValueError, match="duplicate acquisition"):
+        read_manifest(path)
+
+
+def test_manifest_checksum_is_hash_of_exact_written_bytes(tmp_path):
+    path = tmp_path / "scan_decisions.tsv"
+
+    digest = write_manifest(path, [DecisionRow.clean(anatomical_key("sub-s01", "ses-01", "T1w"))])
+
+    assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_manifest_is_invariant_to_row_and_semantic_set_order(tmp_path):
+    first = replace(
+        DecisionRow.clean(functional_key("sub-s01", "ses-01", "nBack", "1")),
+        expected_echoes=(1, 2, 3),
+        observed_echoes=(1, 3),
+        missing_echoes=(2,),
+        flags=("missing_echo", "motion"),
+    )
+    permuted = replace(
+        first,
+        expected_echoes=(3, 1, 2),
+        observed_echoes=(3, 1),
+        missing_echoes=(2,),
+        flags=("motion", "missing_echo"),
+    )
+    anatomical = DecisionRow.clean(anatomical_key("sub-s01", "ses-01", "T1w"))
+    first_path = tmp_path / "first.tsv"
+    second_path = tmp_path / "second.tsv"
+
+    first_digest = write_manifest(first_path, [first, anatomical])
+    second_digest = write_manifest(second_path, [anatomical, permuted])
+
+    assert first_digest == second_digest
+    assert first_path.read_bytes() == second_path.read_bytes()
