@@ -257,6 +257,15 @@ class TestMultiEcho:
 
 
 class TestScoping:
+    def test_vcs_administration_iqm_is_not_a_motion_acquisition(self, tmp_path):
+        iqm(
+            tmp_path / ".git" / "annex" / "objects" /
+            "sub-s03_ses-05_task-rest_run-1_bold.json",
+            fd_mean=0.9,
+        )
+
+        assert MotionGenerator().generate("discovery", {}, args(mriqc_dir=str(tmp_path))) == []
+
     def test_selected_generator_requires_mriqc_dir(self):
         with pytest.raises(FileNotFoundError, match="mriqc-dir"):
             MotionGenerator().generate("discovery", {}, args())

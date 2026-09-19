@@ -21,6 +21,7 @@ from network_qa.compiler import (
     mriqc_inventory_records,
 )
 from network_qa.manifest import manifest_bytes, read_manifest
+from network_qa._evidence_paths import is_vcs_administration_path
 
 
 DROP_REASONS = frozenset({
@@ -94,6 +95,8 @@ def _source_inventory_matches(bids_dir: Path, commit: str, records: list[dict], 
             continue
         header, raw_path = entry.split(b'\t', 1)
         path = os.fsdecode(raw_path)
+        if is_vcs_administration_path(Path(path)):
+            continue
         parts = Path(path).parts
         in_scope = (Path(path).suffix in {'.json', '.html', '.tsv'} if mriqc else
                     ((len(parts) > 1 and (parts[0].startswith('sub-') or parts[0] == 'sourcedata'))

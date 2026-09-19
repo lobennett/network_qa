@@ -13,6 +13,22 @@ from network_qa.manifest import read_manifest
 STEM = 'sub-s01_ses-01_task-nBack_run-1'
 
 
+@pytest.mark.parametrize('administration', ['.git', '.hg', '.svn', '.bzr', '.jj', '.pijul',
+                                          '_darcs', 'CVS', 'RCS', 'SCCS', '.fossil-settings'])
+def test_vcs_administration_does_not_enter_evidence_or_provenance(tmp_path, administration):
+    bids, mriqc, output = fixture(tmp_path)
+    compiler.compile_decisions(bids, mriqc, output)
+    before = output.read_bytes(), json.loads(output.with_suffix('.meta.json').read_text())
+    for root in (bids / 'sourcedata/canonical', mriqc / 'nested'):
+        internal = root / administration / 'objects' / f'{STEM}_echo-2_bold.json'
+        internal.parent.mkdir(parents=True)
+        internal.write_text(json.dumps({'provenance': {'version': 'internal-not-evidence',
+                                                      'input_commit': '0' * 40}}))
+    compiler.compile_decisions(bids, mriqc, output)
+    after = output.read_bytes(), json.loads(output.with_suffix('.meta.json').read_text())
+    assert after == before
+
+
 def fixture(tmp_path, *, exception=False):
     bids, mriqc = tmp_path / 'bids', tmp_path / 'mriqc'
     func = bids / 'sub-s01/ses-01/func'

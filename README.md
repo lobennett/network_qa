@@ -143,7 +143,12 @@ sourcedata, `dataset_description.json`, `participants.tsv`, `participants.json`,
 HTML, and TSV files have a separate inventory. Symlink targets and readable content
 are hashed, and unavailable content is recorded explicitly. Directory symlinks in
 either evidence scope are rejected before inspection; ordinary git-annex file
-symlinks remain supported. Outputs within BIDS
+symlinks remain supported. VCS administration directories (`.git`, `.hg`, `.svn`,
+`.bzr`, `.jj`, `.pijul`, `_darcs`, `CVS`, `RCS`, `SCCS`, and `.fossil-settings`) are
+pruned before traversal in BIDS and MRIQC evidence scopes. Public annex IQM/report
+symlinks retain their literal targets and resolved-content hashes; internal object
+paths are not separate evidence records. The same exclusions apply to review
+evidence discovery, MRIQC provenance, and committed-path comparisons. Outputs within BIDS
 must be under `code/`, and outputs cannot be placed inside the MRIQC evidence root.
 
 Both outputs are staged before publication. Each replacement is atomic; a caught

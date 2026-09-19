@@ -38,6 +38,7 @@ from network_qa.exclusions.base import (
     load_dataset_subjects, register_generator, run_entity, validate_number,
 )
 from network_qa.functional import FunctionalEvidence
+from network_qa._evidence_paths import iter_evidence_files
 from network_qa.manifest import AcquisitionKey
 
 
@@ -102,7 +103,7 @@ def _motion_candidates(mriqc_dir: Path) -> tuple[_IqmCandidate, ...]:
     if not mriqc_dir.is_dir():
         return ()
     candidates = []
-    for path in sorted(mriqc_dir.rglob("*_bold.json")):
+    for path in sorted(path for path in iter_evidence_files(mriqc_dir) if path.name.endswith("_bold.json")):
         candidate = _parse_iqm_candidate(path)
         if candidate is not None:
             candidates.append(candidate)
@@ -285,7 +286,8 @@ ENTITIES = re.compile(
 def _iqm_files(mriqc_dir: Path, subjects: set[str] | None = None) -> list[Path]:
     """One IQM file per acquisition: echo-1 where multi-echo, else the only file."""
     keep: dict[tuple, Path] = {}
-    for p in sorted(mriqc_dir.rglob("*_bold.json")):
+    for p in sorted(path for path in iter_evidence_files(mriqc_dir)
+                    if path.name.endswith("_bold.json")):
         m = ENTITIES.match(p.name)
         if not m:
             continue

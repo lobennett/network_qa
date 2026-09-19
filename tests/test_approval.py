@@ -543,3 +543,47 @@ def test_generation_timestamp_is_verified_against_stored_commit(generated):
     data['generation_metadata_sha256'] = compiler.generation_metadata_digest(data)
     generated[1].write_text(json.dumps(data))
     assert not seal_approval(*generated).ok
+
+
+@pytest.mark.parametrize('damage,target_index', [('none', 0), ('corrupt', 0), ('missing', 0),
+                                                 ('corrupt', 1), ('missing', 1)])
+def test_independent_mriqc_annex_public_paths_are_the_evidence(generated, damage, target_index):
+    manifest, metadata, bids = generated
+    mriqc = Path(json.loads(metadata.read_text())['input_roots']['mriqc_dir'])
+    git(mriqc, 'init', '-q')
+    public_paths = [next(mriqc.rglob('*_bold.json')), next(mriqc.glob('*.html'))]
+    targets = []
+    for public in public_paths:
+        content = public.read_bytes()
+        key = f'SHA256E-s{len(content)}--{hashlib.sha256(content).hexdigest()}{public.suffix}'
+        target = mriqc / '.git/annex/objects/aa/bb' / key / key
+        target.parent.mkdir(parents=True)
+        target.write_bytes(content)
+        public.unlink()
+        public.symlink_to(os.path.relpath(target, public.parent))
+        targets.append(target)
+    save(mriqc, 'annex IQM and report')
+    compiler.compile_decisions(bids, mriqc, manifest)
+    rows = json.loads(metadata.read_text())['mriqc_inventory']
+    assert {r['path'] for r in rows} == {p.relative_to(mriqc).as_posix() for p in public_paths}
+    for public, target in zip(public_paths, targets):
+        record = next(r for r in rows if r['path'] == public.relative_to(mriqc).as_posix())
+        assert record['symlink'] == str(public.readlink())
+        assert record['sha256'] == hashlib.sha256(target.read_bytes()).hexdigest()
+        assert record['status'] == 'available'
+    resolve(manifest)
+    result = seal_approval(*generated)
+    assert result.ok, result.errors
+    save(mriqc, 'post-approval MRIQC milestone', 1)
+    assert validate_approval(*generated).ok
+    if damage == 'none':
+        return
+    if damage == 'corrupt':
+        targets[target_index].write_bytes(b'changed annex content')
+    else:
+        targets[target_index].unlink()
+    assert not validate_approval(*generated).ok
+    # Regenerating cannot legitimize bytes that disagree with the committed key.
+    compiler.compile_decisions(bids, mriqc, manifest)
+    resolve(manifest)
+    assert not seal_approval(*generated).ok

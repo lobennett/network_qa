@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 
 from network_qa.anatomical import inspect_anatomicals
+from network_qa._evidence_paths import iter_evidence_files, reject_directory_symlink as _reject_directory_symlink
 from network_qa.exclusions.behavioral import behavioral_evidence
 from network_qa.exclusions.motion import inspect_motion
 from network_qa.functional import inspect_functionals
@@ -41,19 +42,6 @@ def dataset_subjects(bids_dir: Path) -> tuple[str, ...]:
     return tuple(sorted(subjects))
 
 
-def _reject_directory_symlink(path: Path) -> None:
-    if path.is_symlink() and path.is_dir():
-        raise ValueError(f'evidence directory symlink is not supported: {path}')
-
-
-def _reject_directory_symlinks(root: Path) -> None:
-    # rglob yields directory links without following them. Check the scope root
-    # too: a subject or sourcedata root may itself be linked outside the dataset.
-    _reject_directory_symlink(root)
-    for path in root.rglob('*'):
-        _reject_directory_symlink(path)
-
-
 def _file_record(root: Path, path: Path) -> dict:
     _reject_directory_symlink(path)
     record = {'path': path.relative_to(root).as_posix()}
@@ -79,9 +67,7 @@ def inventory_records(bids_dir: Path) -> list[dict]:
     """
     paths = set()
     for root in [*bids_dir.glob('sub-*'), bids_dir / 'sourcedata']:
-        _reject_directory_symlinks(root)
-        if root.is_dir():
-            paths.update(path for path in root.rglob('*') if path.is_file() or path.is_symlink())
+        paths.update(iter_evidence_files(root))
     for name in ('dataset_description.json', 'participants.tsv', 'participants.json', '.bidsignore'):
         path = bids_dir / name
         if path.exists() or path.is_symlink():
@@ -95,9 +81,8 @@ def inventory_digest(records: list[dict]) -> str:
 
 
 def _mriqc_records(mriqc_dir: Path) -> list[dict]:
-    _reject_directory_symlinks(mriqc_dir)
-    return [_file_record(mriqc_dir, path) for path in sorted(mriqc_dir.rglob('*'))
-            if path.suffix in {'.json', '.html', '.tsv'} and (path.is_file() or path.is_symlink())]
+    return [_file_record(mriqc_dir, path) for path in sorted(iter_evidence_files(mriqc_dir))
+            if path.suffix in {'.json', '.html', '.tsv'}]
 
 
 def mriqc_inventory_records(mriqc_dir: Path) -> list[dict]:
@@ -135,7 +120,7 @@ def _provenance(bids_dir, mriqc_dir):
     # Cover every acquisition IQM in the supplied MRIQC evidence root, including
     # unused echoes and ambiguous candidates, so no potential contributor is lost.
     # Dataset descriptions and unrelated JSON cannot establish input provenance.
-    for path in sorted(mriqc_dir.rglob('*.json')):
+    for path in sorted(path for path in iter_evidence_files(mriqc_dir) if path.suffix == '.json'):
         record = None
         if path.name.endswith(('_bold.json', '_T1w.json', '_T2w.json')):
             record = {'path': path.relative_to(mriqc_dir).as_posix(),

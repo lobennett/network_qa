@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 from network_qa.manifest import AcquisitionKey
+from network_qa._evidence_paths import iter_evidence_files
 
 
 METRIC_NAMES = ("cjv", "cnr", "snr", "efc", "fber", "qi_2", "wm2max")
@@ -143,7 +144,8 @@ def _iqm_candidates(mriqc_dir: Path) -> tuple[_IqmCandidate, ...]:
     if not mriqc_dir.is_dir():
         return ()
     candidates = []
-    for path in sorted((*mriqc_dir.rglob("*_T1w.json"), *mriqc_dir.rglob("*_T2w.json"))):
+    for path in sorted(path for path in iter_evidence_files(mriqc_dir)
+                       if path.name.endswith(("_T1w.json", "_T2w.json"))):
         parsed = _parse_candidate(path, path.name.removesuffix(".json"))
         if parsed is not None:
             candidates.append(_IqmCandidate(parsed.path, parsed.key, parsed.identity_flags))
