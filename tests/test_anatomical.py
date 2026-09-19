@@ -284,6 +284,36 @@ def test_invalid_mriqc_reports_are_explicit_and_cannot_support_recommendations(t
     assert {row.recommendation for row in t1w_rows} == {"keep-second"}
 
 
+def test_readable_report_symlink_to_nonempty_regular_file_is_complete_evidence(tmp_path):
+    bids = tmp_path / "bids"
+    mriqc = tmp_path / "mriqc"
+    first = write_anatomical(bids, suffix="T1w", acquisition="first", run="1")
+    second = write_anatomical(bids, suffix="T1w", acquisition="second", run="2")
+    t2w = write_anatomical(bids, suffix="T2w")
+    for path, metrics in (
+        (first, valid_metrics(cjv=0.4, cnr=3.0)),
+        (second, valid_metrics(cjv=0.7, cnr=2.0)),
+        (t2w, valid_metrics()),
+    ):
+        write_iqm(mriqc, path, **metrics)
+    report_target = tmp_path / "annex-content" / "report.html"
+    report_target.parent.mkdir()
+    report_target.write_text("MRIQC report")
+    first_report = mriqc / f"{first.name.removesuffix('.nii.gz')}.html"
+    first_report.symlink_to(report_target)
+    write_report(mriqc, second)
+    write_report(mriqc, t2w)
+
+    rows = inspect_anatomicals(bids, mriqc, ["sub-s01"])
+    t1w_rows = [row for row in rows if row.key.suffix == "T1w"]
+    first_row, = [row for row in t1w_rows if row.key.acquisition == "first"]
+
+    assert first_row.report_path == first_report
+    assert "invalid_report" not in first_row.flags
+    assert {row.recommendation for row in t1w_rows} == {"keep-first"}
+    assert {row.recommendation_status for row in t1w_rows} == {"clear"}
+
+
 def test_counts_anatomicals_across_sessions_for_each_subject(tmp_path):
     bids = tmp_path / "bids"
     mriqc = tmp_path / "mriqc"

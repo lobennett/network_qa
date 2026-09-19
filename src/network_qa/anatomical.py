@@ -163,9 +163,9 @@ def _mriqc_reports(mriqc_dir: Path) -> dict[AcquisitionKey, tuple[_ReportCandida
 
 
 def _valid_report(path: Path) -> bool:
-    """A report must be a real readable file with content, not merely a pathname."""
+    """Accept a readable nonempty regular report target, including annex symlinks."""
     try:
-        if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
+        if not path.is_file() or path.stat().st_size <= 0:
             return False
         with path.open("rb") as handle:
             return bool(handle.read(1))
