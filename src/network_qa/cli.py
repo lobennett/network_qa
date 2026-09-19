@@ -46,6 +46,16 @@ def _cmd_generate(args: argparse.Namespace) -> None:
     print(f"Generated scan decisions -> {output}")
 
 
+def _cmd_approval(args: argparse.Namespace) -> None:
+    from dataclasses import asdict
+    from network_qa.approval import seal_approval, validate_approval
+    operation = seal_approval if args.decision_command == 'approve' else validate_approval
+    result = operation(args.manifest, args.metadata, args.bids_dir)
+    print(json.dumps(asdict(result), sort_keys=True))
+    if not result.ok:
+        raise SystemExit(1)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="network-qa", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -57,6 +67,13 @@ def _build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--mriqc-dir", type=Path, required=True)
     generate.add_argument("--output", type=Path, required=True)
     generate.set_defaults(func=_cmd_generate)
+
+    for command in ('approve', 'validate'):
+        gate = decision_commands.add_parser(command, help=f'{command.capitalize()} scan-review approval')
+        gate.add_argument('--manifest', type=Path, required=True)
+        gate.add_argument('--metadata', type=Path, required=True)
+        gate.add_argument('--bids-dir', type=Path, required=True)
+        gate.set_defaults(func=_cmd_approval)
 
     # compile
     comp_p = sub.add_parser("compile", help="Run registered generators -> provenance lockfile")

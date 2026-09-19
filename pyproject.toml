@@ -1,6 +1,6 @@
 [project]
 name = "network_qa"
-version = "0.1.0"
+version = "0.2.0"
 description = "Quality-assurance metrics + decisions for the r01network pipeline (imported by network_fmri and other orchestrators)."
 readme = "README.md"
 requires-python = ">=3.11"

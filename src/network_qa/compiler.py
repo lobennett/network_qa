@@ -14,7 +14,7 @@ from network_qa.anatomical import inspect_anatomicals
 from network_qa.exclusions.behavioral import behavioral_evidence
 from network_qa.exclusions.motion import inspect_motion
 from network_qa.functional import inspect_functionals
-from network_qa.manifest import DecisionRow, write_manifest
+from network_qa.manifest import DecisionRow, manifest_bytes, write_manifest
 
 
 def _json_bytes(value) -> bytes:
@@ -98,6 +98,19 @@ def _mriqc_records(mriqc_dir: Path) -> list[dict]:
     _reject_directory_symlinks(mriqc_dir)
     return [_file_record(mriqc_dir, path) for path in sorted(mriqc_dir.rglob('*'))
             if path.suffix in {'.json', '.html', '.tsv'} and (path.is_file() or path.is_symlink())]
+
+
+def mriqc_inventory_records(mriqc_dir: Path) -> list[dict]:
+    """Public MRIQC JSON/HTML/TSV content inventory contract."""
+    return _mriqc_records(mriqc_dir)
+
+
+def generation_metadata_digest(metadata: dict) -> str:
+    """Bind every generated field, excluding the digest and later approval fields."""
+    excluded = {'generation_metadata_sha256', 'approved_manifest_sha256',
+                'approved_metadata_sha256'}
+    return hashlib.sha256(_json_bytes({k: v for k, v in metadata.items()
+                                      if k not in excluded})).hexdigest()
 
 
 def _git(root: Path, *arguments: str) -> str | None:
@@ -206,23 +219,14 @@ def _publish_pair(output: Path, manifest: Path, metadata: Path) -> None:
         raise
 
 
-def compile_decisions(bids_dir: Path, mriqc_dir: Path, output: Path) -> Path:
-    """Generate unapproved decisions and deterministic, explicitly unsealed metadata."""
-    bids_dir, mriqc_dir, output = Path(bids_dir), Path(mriqc_dir), Path(output).absolute()
+def collect_decision_evidence(bids_dir: Path, mriqc_dir: Path) -> tuple[tuple[DecisionRow, ...], dict]:
+    """Recompute the exact generated baseline and metadata without writing files."""
+    bids_dir, mriqc_dir = Path(bids_dir), Path(mriqc_dir)
     _reject_directory_symlink(bids_dir)
     _reject_directory_symlink(mriqc_dir)
     bids_dir, mriqc_dir = bids_dir.resolve(), mriqc_dir.resolve()
     if not bids_dir.is_dir() or not mriqc_dir.is_dir():
         raise ValueError('BIDS and MRIQC inputs must be existing directories')
-    if output.suffix != '.tsv':
-        raise ValueError('manifest output must have a .tsv suffix')
-    resolved_output = output.resolve()
-    if resolved_output.is_relative_to(mriqc_dir):
-        raise ValueError('output must be outside MRIQC evidence')
-    if resolved_output.is_relative_to(bids_dir):
-        relative = resolved_output.relative_to(bids_dir)
-        if len(relative.parts) == 1 or relative.parts[0] != 'code':
-            raise ValueError('output inside BIDS must be under code/')
     before = inventory_records(bids_dir)
     mriqc_before = _mriqc_records(mriqc_dir)
     functionals = inspect_functionals(bids_dir)
@@ -268,6 +272,26 @@ def compile_decisions(bids_dir: Path, mriqc_dir: Path, output: Path) -> Path:
         'behavioral_evidence': [asdict(row) for row in behavior],
         'row_count': len(rows),
     }
+    metadata['manifest_sha256'] = hashlib.sha256(manifest_bytes(rows)).hexdigest()
+    # Round-trip to the JSON representation: behavioral dataclasses contain tuples.
+    metadata = json.loads(_json_bytes(metadata))
+    metadata['generation_metadata_sha256'] = generation_metadata_digest(metadata)
+    return tuple(sorted(rows, key=lambda row: row.key)), metadata
+
+
+def compile_decisions(bids_dir: Path, mriqc_dir: Path, output: Path) -> Path:
+    """Generate unapproved decisions and deterministic, explicitly unsealed metadata."""
+    bids_dir, mriqc_dir, output = Path(bids_dir), Path(mriqc_dir), Path(output).absolute()
+    if output.suffix != '.tsv':
+        raise ValueError('manifest output must have a .tsv suffix')
+    resolved_output = output.resolve()
+    if resolved_output.is_relative_to(mriqc_dir.resolve()):
+        raise ValueError('output must be outside MRIQC evidence')
+    if resolved_output.is_relative_to(bids_dir.resolve()):
+        relative = resolved_output.relative_to(bids_dir.resolve())
+        if len(relative.parts) == 1 or relative.parts[0] != 'code':
+            raise ValueError('output inside BIDS must be under code/')
+    rows, metadata = collect_decision_evidence(bids_dir, mriqc_dir)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.scan-decisions-', dir=output.parent) as temporary:
         staging = Path(temporary)

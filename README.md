@@ -80,8 +80,10 @@ accuracy / RT / omission criteria this study previously applied. They lived in
 
 ```
 src/network_qa/
-  cli.py                    one subcommand: compile
+  cli.py                    compile and decisions generate/approve/validate
   compile.py                run the generators, merge, dedupe, stamp provenance
+  compiler.py               compile scan-review evidence and generation provenance
+  approval.py               verify review decisions and seal metadata checksums
   decisions.py              parse a hand-reviewed decisions TSV
   exclusions/base.py        generator registry + provenance helpers
   exclusions/motion.py      MRIQC motion evidence
@@ -130,8 +132,8 @@ The aggregate commit is populated only when every acquisition IQM in the MRIQC r
 has the same valid full Git commit; unrelated JSON cannot supply that evidence.
 The deterministic generation timestamp uses the source
 commit time (or `null`); an orchestrator's milestone receipt owns the wall-clock
-execution time. `approved_manifest_sha256` remains `null` until a separate approval
-workflow seals the decisions.
+execution time. `generation_metadata_sha256` binds all generation fields.
+`approved_manifest_sha256` remains `null` until approval seals the decisions.
 
 `compiler.inventory_records` and `compiler.inventory_digest` expose the BIDS
 inventory contract for approval validation. It covers raw subject files, canonical
@@ -148,3 +150,74 @@ publication failure restores the prior manifest. As two directory entries cannot
 be replaced in a single filesystem operation, readers must verify the metadata's
 manifest digest to detect a process interruption between replacements. Generation
 is a serial workflow stage; concurrent writers are not supported.
+
+### Review, approve, and validate
+
+After generation, edit only `decision`, `approved`, `reason_code`, `reason_detail`,
+`reviewer`, and `reviewed_at` in the TSV. Every flagged or approval-required row must
+be resolved to `keep` or `drop`, with `approved=yes`, a nonempty explanation,
+reviewer, and review timestamp. Clean rows may remain `keep` and `approved=no`.
+Any drop, including a manually dropped clean row, requires explicit approval and a
+controlled reason: `excessive_motion`, `anatomical_quality`,
+`incomplete_acquisition`, `severe_artifact`, `duplicate_lower_quality`, `aborted_run`,
+`missing_required_metadata`, or `other`. Recommendations never approve a row.
+
+```bash
+network-qa decisions approve \
+    --manifest <bids>/code/network_fmri/scan_decisions.tsv \
+    --metadata <bids>/code/network_fmri/scan_decisions.meta.json --bids-dir <bids>
+network-qa decisions validate \
+    --manifest <bids>/code/network_fmri/scan_decisions.tsv \
+    --metadata <bids>/code/network_fmri/scan_decisions.meta.json --bids-dir <bids>
+```
+
+Both commands return JSON with `ok`, `errors` (an array of diagnostic strings), and
+`manifest_sha256`. Exit status is 0 for success, 1 for blocked approval or invalid /
+unavailable inputs, and 2 for argparse command-usage errors. API callers use
+`approval.seal_approval(manifest, metadata, bids_dir)` and
+`approval.validate_approval(manifest, metadata, bids_dir)`, returning `ApprovalResult`.
+
+The gate reconstructs the complete generated baseline through the read-only
+`compiler.collect_decision_evidence` contract. Its canonical TSV must reproduce the
+generation `manifest_sha256`; every metadata generation field must match current
+inputs. A projection of all TSV columns except the six human review fields must
+equal that reconstructed baseline. This distinguishes legitimate review edits from
+a mismatched manifest/metadata pair after interrupted publication. Identities,
+evidence, row order, flags, approval requirements, and recommendations cannot be
+edited during review. Regenerate manifests from earlier versions that lack the
+generation metadata checksum.
+
+Approval requires available BIDS and MRIQC inventory content, the same resolved
+roots, a known source DataLad/Git commit with no uncommitted inventory changes,
+and unchanged package commit/version provenance. A source checkout must be clean;
+a VCS-installed wheel may use its recorded PEP 610 commit. The MRIQC version must
+be known, and every acquisition IQM must record the same valid `provenance.input_commit`,
+equal to the source commit. Unknown, missing, malformed, or conflicting MRIQC input
+provenance blocks sealing; the gate never fills it with the current BIDS HEAD.
+MRIQC's own dataset commit may be null when it has no independent Git dataset;
+its input commit and content inventory still bind the evidence.
+
+BIDS file contents are compared directly to Git blobs in the source commit, so
+ignore rules and index flags cannot conceal uncommitted evidence. A file symlink
+must resolve to another inventoried, committed file, or to an annex object with a
+matching `SHA256` / `SHA256E` key, size, and content checksum. Other external-link or
+annex-key backends are unbound for this gate and require a separately reviewed
+verification contract. Git-clean filters and unlocked annex pointer files are not
+interpreted as raw-content provenance.
+
+This strict source-commit check also rejects a new DataLad milestone commit between
+generation and approval, even when the raw inventory is unchanged. Orchestration
+must reconcile those snapshots through a reviewed provenance contract before using
+separate generation/approval milestone saves. A new receipt format or acceptance of
+an ancestor MRIQC input commit is not inferred here. Inventory reconstruction reads
+all covered content and can take time on a full dataset.
+
+`approve` atomically updates only `approved_manifest_sha256` and
+`approved_metadata_sha256` in the sidecar. It never changes the manifest or BIDS
+evidence. `validate` writes nothing and requires an existing seal. Any later TSV
+edit invalidates the seal, including changes to explanations or whitespace; edits
+to metadata or current evidence also fail validation. Repeating approval of an
+unchanged sealed pair is a read-only success. A changed sealed TSV cannot be
+resealed directly; regenerate and review a fresh pair. These checksums detect stale
+or edited artifacts; they do not authenticate reviewer identity or provide a
+cryptographic signature. Keep generation, review, approval, and curation serial.

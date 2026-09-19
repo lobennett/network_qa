@@ -169,8 +169,8 @@ def functional_key(subject: str, session: str, task: str, run: str) -> Acquisiti
     )
 
 
-def write_manifest(path: Path, rows: Iterable[DecisionRow]) -> str:
-    """Write a deterministic TSV and return the SHA-256 of its exact bytes."""
+def manifest_bytes(rows: Iterable[DecisionRow]) -> bytes:
+    """Serialize the canonical TSV without writing to the filesystem."""
     row_tuple = tuple(rows)
     _ensure_unique(row_tuple)
     ordered = tuple(sorted(row_tuple, key=lambda row: row.key))
@@ -178,7 +178,12 @@ def write_manifest(path: Path, rows: Iterable[DecisionRow]) -> str:
     writer = csv.writer(output, delimiter="\t", lineterminator="\n")
     writer.writerow(_COLUMNS)
     writer.writerows(_serialize_row(row) for row in ordered)
-    data = output.getvalue().encode("utf-8")
+    return output.getvalue().encode("utf-8")
+
+
+def write_manifest(path: Path, rows: Iterable[DecisionRow]) -> str:
+    """Write a deterministic TSV and return the SHA-256 of its exact bytes."""
+    data = manifest_bytes(rows)
     path.write_bytes(data)
     return hashlib.sha256(data).hexdigest()
 
