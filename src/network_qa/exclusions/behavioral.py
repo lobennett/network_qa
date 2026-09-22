@@ -238,7 +238,7 @@ def behavioral_evidence(bids_dir: Path, functionals) -> tuple[BehavioralEvidence
     Rest and reviewed absence exceptions need no events or truncation files. Other
     missing/invalid inputs remain unknown; positive trial losses require review.
     """
-    behavior_root = bids_dir / 'sourcedata/behavioral'
+    behavior_root = bids_dir / 'sourcedata/behavioral/in_scanner'
     qc_root = bids_dir / 'sourcedata/events_qc'
     exception_path = behavior_root / 'behavioral_exceptions.tsv'
     errors_path = qc_root / 'conversion_errors.tsv'

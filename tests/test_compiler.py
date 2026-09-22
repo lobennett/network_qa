@@ -42,7 +42,7 @@ def fixture(tmp_path, *, exception=False):
     iqm.write_text(json.dumps({'fd_mean': .1, 'fd_perc': 1, 'dvars_std': 1,
                               'provenance': {'settings': {'fd_thres': .5}, 'version': '24.0.2'}}))
     (mriqc / f'{STEM}_bold.html').write_text('MRIQC report')
-    beh = bids / 'sourcedata/behavioral'
+    beh = bids / 'sourcedata/behavioral/in_scanner'
     beh.mkdir(parents=True)
     (beh / 'behavioral_exceptions.tsv').write_text(
         'subject\tsession\ttask\trun\treason\tdetail\treviewed_by\treviewed_at\n' +
@@ -99,9 +99,9 @@ def test_conversion_error_requires_review_even_with_stale_events(tmp_path):
 
 
 @pytest.mark.parametrize('relative,flag', [
-    ('sourcedata/behavioral/behavioral_exceptions.tsv', 'behavioral_evidence_unknown'),
+    ('sourcedata/behavioral/in_scanner/behavioral_exceptions.tsv', 'behavioral_evidence_unknown'),
     ('sourcedata/events_qc/conversion_errors.tsv', 'event_conversion_unknown'),
-    (f'sourcedata/behavioral/sub-s01/ses-01/beh/{STEM}_beh.csv', 'behavioral_evidence_unknown'),
+    (f'sourcedata/behavioral/in_scanner/sub-s01/ses-01/beh/{STEM}_beh.csv', 'behavioral_evidence_unknown'),
     (f'sourcedata/events_qc/sub-s01/ses-01/{STEM}_desc-truncation.json', 'truncation_unknown'),
     (f'sub-s01/ses-01/func/{STEM}_events.tsv', 'events_unknown'),
 ])
@@ -270,7 +270,7 @@ def test_source_commit_and_mriqc_provenance_are_retained(tmp_path):
 @pytest.mark.parametrize('root_index,relative', [
     (0, 'sub-s01'), (0, 'sourcedata'),
     (0, 'sub-s01/ses-01'), (0, 'sub-s01/ses-01/func'),
-    (0, 'sourcedata/behavioral'), (1, 'sub-s01/ses-01'),
+    (0, 'sourcedata/behavioral/in_scanner'), (1, 'sub-s01/ses-01'),
 ])
 def test_directory_symlinks_fail_before_inspection_or_publication(tmp_path, monkeypatch, root_index, relative):
     paths = fixture(tmp_path)
@@ -335,7 +335,7 @@ def test_unreviewed_exception_cannot_suppress_missing_evidence(tmp_path, field, 
     import csv
     import io
     paths = fixture(tmp_path, exception=True)
-    table = paths[0] / 'sourcedata/behavioral/behavioral_exceptions.tsv'
+    table = paths[0] / 'sourcedata/behavioral/in_scanner/behavioral_exceptions.tsv'
     reader = csv.DictReader(io.StringIO(table.read_text()), delimiter='\t')
     columns = reader.fieldnames
     row, = list(reader)

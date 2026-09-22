@@ -384,7 +384,7 @@ def test_git_status_cannot_hide_unbound_inventory_changes(generated, hidden):
         (bids / '.git/info/exclude').write_text('sourcedata/ignored.txt\n')
         (bids / 'sourcedata/ignored.txt').write_text('not recorded in source commit')
     else:
-        relative = 'sourcedata/behavioral/behavioral_exceptions.tsv'
+        relative = 'sourcedata/behavioral/in_scanner/behavioral_exceptions.tsv'
         git(bids, 'update-index', '--assume-unchanged', relative)
         path = bids / relative
         path.write_text(path.read_text() + '\n')
