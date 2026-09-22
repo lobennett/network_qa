@@ -1,4 +1,4 @@
-"""Optional real sibling-package integration; see docs/CODE-REVIEW.md to run."""
+"""Optional integration coverage for installed sibling packages."""
 import json
 
 import nibabel as nib
