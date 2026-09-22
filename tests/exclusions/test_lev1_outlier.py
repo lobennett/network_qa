@@ -219,9 +219,8 @@ def test_end_to_end_on_real_discovery_cohort_qc():
         "discovery", {}, _make_args(real_csv)
     )
 
-    # Discovery cohort N=5: only strict_vif rule should fire (per the math finding
-    # in docs/audits/2026-05-06-lev1-base-task-audit.md — outlier_pct bounded by
-    # sqrt(N-1) ~= 2.0 for N=5, so neither combined nor strict_outliers fires).
+    # With N=5, outlier_pct is bounded by sqrt(N-1) ~= 2.0, so only the
+    # strict_vif rule should fire; combined and strict_outliers cannot.
     # Just assert the shape is sound; counts depend on the actual data.
     for e in entries:
         assert e["source"] == "lev1_outlier"
