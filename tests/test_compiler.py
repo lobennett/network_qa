@@ -87,6 +87,18 @@ def test_clean_task_and_missing_anatomy(tmp_path):
     assert all(r.decision == 'review' and r.approval_required and not r.approved for r in absent)
 
 
+def test_unknown_event_duration_is_valid_bids_evidence(tmp_path):
+    paths = fixture(tmp_path)
+    events = paths[0] / f'sub-s01/ses-01/func/{STEM}_events.tsv'
+    with events.open('a') as stream:
+        stream.write('2\tn/a\n')
+
+    row = run(paths)
+
+    assert row.event_status == 'available'
+    assert 'events_unknown' not in row.flags
+
+
 def test_conversion_error_requires_review_even_with_stale_events(tmp_path):
     paths = fixture(tmp_path)
     errors = paths[0] / 'sourcedata/events_qc/conversion_errors.tsv'

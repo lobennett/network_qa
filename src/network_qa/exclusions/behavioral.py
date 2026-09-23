@@ -194,8 +194,12 @@ def _read_table_file(paths, *, events=False):
             for row in reader:
                 if None in row or any(value is None for value in row.values()):
                     return False
-                if events and any(not math.isfinite(float(row[name])) for name in ('onset', 'duration')):
-                    return False
+                if events:
+                    if not math.isfinite(float(row['onset'])):
+                        return False
+                    duration = row['duration']
+                    if duration != 'n/a' and not math.isfinite(float(duration)):
+                        return False
                 count += 1
             return count > 0
     except (OSError, UnicodeError, csv.Error, ValueError, TypeError):
