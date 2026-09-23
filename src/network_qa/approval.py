@@ -110,6 +110,16 @@ def _source_inventory_matches(bids_dir: Path, commit: str, records: list[dict], 
     for record in records:
         path = bids_dir / record['path']
         mode, kind, oid = committed[record['path']]
+        if 'gitlink' in record:
+            if (mode != '160000' or kind != 'commit' or oid != record['gitlink']
+                    or not path.is_dir()):
+                return False
+            live = subprocess.run([
+                'git', '--no-optional-locks', '-C', str(path), 'rev-parse', 'HEAD',
+            ], capture_output=True, text=True, timeout=30)
+            if live.returncode != 0 or live.stdout.strip() != record['gitlink']:
+                return False
+            continue
         if kind != 'blob' or (mode == '120000') != path.is_symlink():
             return False
         digest = hashlib.new('sha1' if len(commit) == 40 else 'sha256')

@@ -453,6 +453,36 @@ def test_source_commit_must_bind_symlink_content(generated, tmp_path, kind):
     assert result.ok is kind.endswith('_valid'), result.errors
 
 
+@pytest.mark.parametrize('state', ['clean', 'dirty', 'different_commit'])
+def test_source_inventory_binds_nested_datalad_commit(generated, state):
+    manifest, metadata, bids = generated
+    nested = bids / 'sourcedata/canonical_behavior'
+    nested.mkdir()
+    git(nested, 'init', '-q')
+    (nested / 'behavior.tsv').write_text('trial\tresponse\n1\tleft\n')
+    save(nested, 'canonical behavior')
+    git(bids, 'add', 'sourcedata/canonical_behavior')
+    parent_commit = save(bids, 'register behavioral dataset')
+    if state == 'dirty':
+        (nested / 'behavior.tsv').write_text('trial\tresponse\n1\tright\n')
+    elif state == 'different_commit':
+        (nested / 'new.tsv').write_text('new\n')
+        save(nested, 'unregistered behavior revision')
+    mriqc = Path(json.loads(metadata.read_text())['input_roots']['mriqc_dir'])
+    iqm = next(mriqc.rglob('*_bold.json'))
+    data = json.loads(iqm.read_text())
+    data['provenance']['input_commit'] = parent_commit
+    iqm.write_text(json.dumps(data))
+    compiler.compile_decisions(bids, mriqc, manifest)
+    inventory = json.loads(metadata.read_text())['inventory']
+    nested_records = [row for row in inventory if row['path'].startswith('sourcedata/canonical_behavior')]
+    assert len(nested_records) == 1
+    assert nested_records[0]['path'] == 'sourcedata/canonical_behavior'
+    resolve(manifest)
+    result = seal_approval(*generated)
+    assert result.ok is (state == 'clean'), result.errors
+
+
 def save(root, message, minute=0):
     git(root, 'add', '.')
     subprocess.run(['git', '-C', str(root), '-c', 'user.name=Test', '-c',

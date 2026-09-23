@@ -5,6 +5,7 @@ from dataclasses import asdict
 import hashlib
 from importlib.metadata import distribution, version
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -65,14 +66,33 @@ def inventory_records(bids_dir: Path) -> list[dict]:
     change its inventory. Symlink targets and content are both bound; unavailable
     annex content is explicitly recorded. Root metadata names are listed below.
     """
+    roots = [*bids_dir.glob('sub-*'), bids_dir / 'sourcedata']
+    nested = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for current, directories, files in os.walk(root):
+            if '.git' in directories or '.git' in files:
+                candidate = Path(current)
+                if _dataset_commit(candidate) is not None:
+                    nested.add(candidate)
+                directories[:] = []
     paths = set()
-    for root in [*bids_dir.glob('sub-*'), bids_dir / 'sourcedata']:
+    for root in roots:
         paths.update(iter_evidence_files(root))
     for name in ('dataset_description.json', 'participants.tsv', 'participants.json', '.bidsignore'):
         path = bids_dir / name
         if path.exists() or path.is_symlink():
             paths.add(path)
-    return [_file_record(bids_dir, path) for path in sorted(paths)]
+    paths = {path for path in paths if not any(path.is_relative_to(dataset) for dataset in nested)}
+    records = [_file_record(bids_dir, path) for path in sorted(paths)]
+    for dataset in sorted(nested):
+        commit = _dataset_commit(dataset)
+        status = _git(dataset, 'status', '--porcelain', '--untracked-files=all')
+        state = 'unreadable' if commit is None or status is None else 'dirty' if status else 'available'
+        records.append({'path': dataset.relative_to(bids_dir).as_posix(),
+                        'gitlink': commit, 'status': state})
+    return sorted(records, key=lambda record: record['path'])
 
 
 def inventory_digest(records: list[dict]) -> str:
