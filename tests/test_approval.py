@@ -421,15 +421,19 @@ def test_git_status_cannot_hide_unbound_inventory_changes(generated, hidden):
     assert any('not bound to source commit' in error for error in result.errors)
 
 
-@pytest.mark.parametrize('kind', ['annex_valid', 'annex_corrupt', 'external', 'loop'])
+@pytest.mark.parametrize('kind', [
+    'annex_valid', 'annex_corrupt', 'annex_md5_valid', 'annex_md5_corrupt', 'external', 'loop',
+])
 def test_source_commit_must_bind_symlink_content(generated, tmp_path, kind):
     manifest, metadata, bids = generated
     content = b'committed annex evidence'
     if kind.startswith('annex'):
-        key = f'SHA256E-s{len(content)}--{hashlib.sha256(content).hexdigest()}.txt'
+        algorithm = 'MD5E' if 'md5' in kind else 'SHA256E'
+        digest = hashlib.md5(content).hexdigest() if 'md5' in kind else hashlib.sha256(content).hexdigest()
+        key = f'{algorithm}-s{len(content)}--{digest}.txt'
         target = bids / '.git/annex/objects/aa/bb' / key / key
         target.parent.mkdir(parents=True)
-        target.write_bytes(content if kind == 'annex_valid' else b'corrupted content')
+        target.write_bytes(content if kind.endswith('_valid') else b'corrupted content')
     elif kind == 'loop':
         target = bids / 'sourcedata/link.txt'
     else:
@@ -446,7 +450,7 @@ def test_source_commit_must_bind_symlink_content(generated, tmp_path, kind):
     compiler.compile_decisions(bids, mriqc, manifest)
     resolve(manifest)
     result = seal_approval(*generated)
-    assert result.ok is (kind == 'annex_valid'), result.errors
+    assert result.ok is kind.endswith('_valid'), result.errors
 
 
 def save(root, message, minute=0):

@@ -122,8 +122,19 @@ def _source_inventory_matches(bids_dir: Path, commit: str, records: list[dict], 
             if relative not in records_by_path:
                 # A Git symlink binds only its literal target. For external annex
                 # objects the committed key must also bind the available bytes.
-                key = re.fullmatch(r'SHA256E?-s([0-9]+)--([a-f0-9]{64})(?:\..*)?', path.readlink().name)
-                if key is None or record['sha256'] != key[2] or path.stat().st_size != int(key[1]):
+                key = re.fullmatch(
+                    r'(SHA256E?|MD5E?)-s([0-9]+)--([a-f0-9]+)(?:\..*)?',
+                    path.readlink().name,
+                )
+                if key is None or path.stat().st_size != int(key[2]):
+                    return False
+                algorithm = 'sha256' if key[1].startswith('SHA256') else 'md5'
+                content_digest = (hashlib.sha256() if algorithm == 'sha256'
+                                  else hashlib.md5(usedforsecurity=False))
+                with path.open('rb') as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                        content_digest.update(chunk)
+                if content_digest.hexdigest() != key[3]:
                     return False
         else:
             digest.update(f'blob {path.stat().st_size}\0'.encode('ascii'))
