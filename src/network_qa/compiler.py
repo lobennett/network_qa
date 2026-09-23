@@ -113,6 +113,33 @@ def _dataset_commit(root: Path) -> str | None:
     return _git(root, 'rev-parse', 'HEAD') if top and Path(top).resolve() == root else None
 
 
+def _receipt_input_commit(mriqc_dir: Path, coverage: list[dict]) -> str | None:
+    """Read the input commit from a complete set of network_fmri MRIQC receipts."""
+    root = mriqc_dir / 'code/network_fmri/run-receipts/mriqc'
+    subjects = set()
+    for record in coverage:
+        match = re.search(r'(?:^|/)sub-([^_/]+)', record['path'])
+        if match:
+            subjects.add(match.group(1))
+    expected = {root / f'sub-{subject}.json' for subject in subjects} | {root / 'group.json'}
+    if not subjects or not all(path.is_file() for path in expected):
+        return None
+    commits = set()
+    for path in expected:
+        try:
+            receipt = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, UnicodeError, ValueError):
+            return None
+        expected_subject = 'group' if path.name == 'group.json' else path.stem.removeprefix('sub-')
+        commit = receipt.get('input_datalad_commit') if isinstance(receipt, dict) else None
+        if (receipt.get('schema_version') != 1 or receipt.get('status') != 'success'
+                or receipt.get('subject') != expected_subject or not isinstance(commit, str)
+                or re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', commit) is None):
+            return None
+        commits.add(commit)
+    return next(iter(commits)) if len(commits) == 1 else None
+
+
 def _provenance(bids_dir, mriqc_dir):
     package_root = Path(__file__).resolve().parents[2]
     versions = set()
@@ -154,6 +181,11 @@ def _provenance(bids_dir, mriqc_dir):
             continue
     input_commits = {record['input_commit'] for record in coverage if record['state'] == 'valid'}
     complete = bool(coverage) and all(record['state'] == 'valid' for record in coverage)
+    receipt_commit = _receipt_input_commit(mriqc_dir, coverage)
+    mriqc_input_commit = (next(iter(input_commits)) if complete and len(input_commits) == 1
+                          else receipt_commit)
+    input_basis = ('iqm-provenance' if complete and len(input_commits) == 1 else
+                   'network_fmri-run-receipts' if receipt_commit else 'unavailable')
     package_commit = _dataset_commit(package_root)
     package_basis = 'source-checkout' if package_commit else 'unknown'
     package_status = _git(package_root, 'status', '--porcelain') if package_commit else None
@@ -175,7 +207,8 @@ def _provenance(bids_dir, mriqc_dir):
         'source_datalad_commit': commit,
         'source_commit_time': _git(bids_dir, 'show', '-s', '--format=%cI', 'HEAD') if commit else None,
         'mriqc_dataset_commit': _dataset_commit(mriqc_dir),
-        'mriqc_input_commit': next(iter(input_commits)) if complete and len(input_commits) == 1 else None,
+        'mriqc_input_commit': mriqc_input_commit,
+        'mriqc_input_commit_basis': input_basis,
         'mriqc_input_commit_candidates': sorted(input_commits),
         'mriqc_input_commit_coverage': coverage,
         'mriqc_input_commit_coverage_scope': 'all-acquisition-iqms-in-mriqc-root',

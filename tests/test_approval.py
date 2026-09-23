@@ -276,6 +276,31 @@ def test_unknown_or_wrong_mriqc_input_commit_blocks_even_regenerated_pair(genera
     assert any('MRIQC input commit' in e for e in result.errors)
 
 
+def test_network_fmri_receipts_supply_standard_mriqc_input_provenance(generated):
+    manifest, metadata, bids = generated
+    mriqc = Path(json.loads(metadata.read_text())['input_roots']['mriqc_dir'])
+    iqm = next(mriqc.rglob('*_bold.json'))
+    data = json.loads(iqm.read_text())
+    data['provenance'].pop('input_commit')
+    iqm.write_text(json.dumps(data))
+    commit = git(bids, 'rev-parse', 'HEAD')
+    receipts = mriqc / 'code/network_fmri/run-receipts/mriqc'
+    receipts.mkdir(parents=True)
+    for name, subject in [('sub-s01.json', 's01'), ('group.json', 'group')]:
+        (receipts / name).write_text(json.dumps({
+            'schema_version': 1,
+            'status': 'success',
+            'subject': subject,
+            'input_datalad_commit': commit,
+        }))
+    compiler.compile_decisions(bids, mriqc, manifest)
+    provenance = json.loads(metadata.read_text())['provenance']
+    assert provenance['mriqc_input_commit'] == commit
+    assert provenance['mriqc_input_commit_basis'] == 'network_fmri-run-receipts'
+    resolve(manifest)
+    assert seal_approval(*generated).ok
+
+
 def test_unavailable_inventory_content_blocks_even_regenerated_pair(generated):
     manifest, metadata, bids = generated
     (bids / 'sourcedata/missing.txt').symlink_to('missing-annex-object')
