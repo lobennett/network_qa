@@ -460,6 +460,12 @@ def collect_decision_evidence(bids_dir: Path, mriqc_dir: Path) -> tuple[tuple[De
         'approved_manifest_sha256': None,
         'approved_metadata_sha256': None,
         'behavioral_evidence': [asdict(row) for row in behavior],
+        'motion_calculations': [
+            {'key': asdict(row.key), 'method': row.fd_method, 'source': row.fd_source,
+             'original_fd_thres': row.fd_original_thres, 'fd_thres': row.fd_thres,
+             'analyzed_volumes': row.fd_n_volumes, 'mriqc_dummy_trs': row.fd_dummy_trs}
+            for row in sorted(motion.values(), key=lambda row: row.key)
+        ],
         'row_count': len(rows),
     }
     metadata['manifest_sha256'] = hashlib.sha256(manifest_bytes(rows)).hexdigest()

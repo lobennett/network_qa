@@ -5,6 +5,7 @@ verify that threshold rather than assume it. Everything else keeps the shared ge
 contract: BIDS-prefixed entities, one entry per excluded acquisition.
 """
 import json
+from dataclasses import replace
 from argparse import Namespace
 
 import pytest
@@ -12,6 +13,63 @@ import pytest
 from network_qa.exclusions.motion import MotionGenerator, inspect_motion
 from network_qa.functional import FunctionalEvidence
 from network_qa.manifest import functional_key
+
+
+def recalculation_fixture(tmp_path):
+    path = func(tmp_path) / 'sub-s03_ses-05_task-nBack_run-1_echo-2_bold.json'
+    iqm(path, fd_mean=0.175, fd_perc=20, fd_thres=0.2)
+    value = json.loads(path.read_text())
+    value.update(size_t=5, dummy_trs=2)
+    path.write_text(json.dumps(value))
+    series = path.with_name(path.name.replace('_bold.json', '_timeseries.tsv'))
+    series.write_text('framewise_displacement\nn/a\n0\n0\n0.2\n0.5\n')
+    series.with_suffix('.json').write_text(json.dumps({'framewise_displacement': {'Units': 'mm'}}))
+    report(tmp_path)
+    return replace(functional('nBack'), tr_count=7), path, series
+
+
+def test_recalculate_fd_at_strictly_greater_than_half_mm(tmp_path):
+    evidence, path, series = recalculation_fixture(tmp_path)
+    before = path.read_bytes()
+    result, = inspect_motion([evidence], tmp_path)
+    assert result.fd_thres == 0.5
+    assert result.fd_perc == 0
+    assert result.flags == ()
+    assert result.fd_method == 'verified_mriqc_timeseries'
+    assert result.fd_n_volumes == 5 and result.fd_dummy_trs == 2
+    assert result.fd_original_thres == 0.2
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize('problem', ['units', 'nan', 'internal_missing', 'length', 'mean', 'percentage', 'first_frame'])
+def test_unverified_timeseries_cannot_clear_cutoff_mismatch(tmp_path, problem):
+    evidence, path, series = recalculation_fixture(tmp_path)
+    if problem == 'units':
+        series.with_suffix('.json').write_text('{"framewise_displacement":{"Units":"cm"}}')
+    elif problem in {'nan', 'internal_missing'}:
+        series.write_text(series.read_text().replace('0.2', 'nan' if problem == 'nan' else 'n/a'))
+    elif problem == 'length':
+        evidence = replace(evidence, tr_count=8)
+    elif problem == 'first_frame':
+        series.write_text(series.read_text().replace('n/a', '0'))
+    else:
+        value = json.loads(path.read_text())
+        value['fd_mean' if problem == 'mean' else 'fd_perc'] = 99
+        path.write_text(json.dumps(value))
+    result, = inspect_motion([evidence], tmp_path)
+    assert 'fd_thres_mismatch' in result.flags
+    assert 'invalid_fd_timeseries' in result.flags
+
+
+def test_recalculated_twenty_percent_trips_task_flag(tmp_path):
+    evidence, path, series = recalculation_fixture(tmp_path)
+    series.write_text(series.read_text().replace('0.5', '0.6').replace('0.2', '0.1'))
+    value = json.loads(path.read_text())
+    value['fd_mean'] = 0.175
+    path.write_text(json.dumps(value))
+    result, = inspect_motion([evidence], tmp_path)
+    assert result.fd_perc == 20
+    assert 'excessive_motion' in result.flags
 
 
 def iqm(path, *, fd_mean=0.05, fd_perc=0.0, dvars_std=1.0, fd_thres=0.5):

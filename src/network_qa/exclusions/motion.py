@@ -1,31 +1,17 @@
-"""MRIQC motion evidence and legacy motion exclusions.
+"""MRIQC motion evidence for scan review and legacy exclusion lockfiles.
 
-MRIQC already runs on every session, so its IQMs are the study's single motion source --
-no recomputation from fMRIPrep confounds, and no dependency on fMRIPrep having run. That
-means the exclusion set is known before preprocessing rather than after.
+Review uses trusted echo 2, mean FD >=0.2 mm, and (for tasks) >=20% of frames
+above 0.5 mm. A different IQM cutoff can be recalculated from matching MRIQC
+timeseries after checking units, frame counts, and the original mean/percentage.
+Percentages include the initial undefined-FD volume in their denominator, matching
+MRIQC, and describe the frames remaining after its nonsteady-state removal.
+Original IQMs remain unchanged. Standardized DVARS is recorded, not thresholded.
 
-Two criteria map straight onto IQMs:
-
-* rest scans -- ``fd_mean`` above ``--fd-threshold``.
-* task scans -- ``fd_perc`` (percentage of frames over MRIQC's ``--fd_thres``) above
-  ``--proportion-fd-threshold``. **MRIQC must have run with ``--fd_thres 0.5``** for that
-  to be the study's criterion; the campaign config sets it, and ``--expect-fd-thres``
-  refuses a mismatch rather than silently applying the wrong cutoff.
-
-The study's third criterion, *proportion of frames with std_dvars > 1.5*, is NOT applied:
-MRIQC reports mean ``dvars_std``, not a proportion, and a mean-based substitute was measured
-against both cohorts before being dropped. It excluded nothing FD had not already caught --
-0 additional runs in discovery (291 acquisitions, max mean 1.392) and 0 in validation (2308,
-max 1.699, both over-threshold runs already excluded on FD). Reinstating a real spike-count
-criterion needs per-frame FD/DVARS, which MRIQC does not publish in its IQMs.
-
-``inspect_motion`` is the review-manifest interface.  It consumes already-reviewed
-functional inventory rows, uses their trusted representative image (echo 2 for
-multi-echo acquisitions), and makes missing or invalid evidence explicit.  The legacy
-``MotionGenerator`` remains below for the pre-existing exclusion-lock CLI contract.
+The legacy MotionGenerator keeps its original IQM-only command-line contract.
 """
 from __future__ import annotations
 
+import csv
 import json
 import math
 import re
@@ -58,6 +44,11 @@ class MotionEvidence:
     fd_thres: float | None
     report_path: Path | None
     flags: tuple[str, ...]
+    fd_method: str = 'mriqc_iqm'
+    fd_source: str = ''
+    fd_original_thres: float | None = None
+    fd_n_volumes: int | None = None
+    fd_dummy_trs: int | None = None
 
 
 @dataclass(frozen=True)
@@ -95,7 +86,7 @@ def inspect_motion(
         if len(matches) > 1:
             evidence.append(_empty_motion(functional.key, (*report_flags, "ambiguous_iqm"), report_path))
             continue
-        evidence.append(_read_motion_iqm(matches[0], report_path, report_flags))
+        evidence.append(_read_motion_iqm(matches[0], report_path, report_flags, functional.tr_count))
     return tuple(evidence)
 
 
@@ -224,6 +215,7 @@ def _empty_motion(
 
 def _read_motion_iqm(
     candidate: _IqmCandidate, report_path: Path | None, report_flags: tuple[str, ...],
+    tr_count: int | None = None,
 ) -> MotionEvidence:
     flags = set((*candidate.identity_flags, *report_flags))
     try:
@@ -243,8 +235,16 @@ def _read_motion_iqm(
     if any(value is None or value < 0 for value in values) or fd_perc > 100:
         flags.add("malformed_iqm")
         return _empty_motion(candidate.key, tuple(flags), report_path)
-    if fd_thres is not None and fd_thres != EXPECTED_FD_THRES:
-        flags.add("fd_thres_mismatch")
+    calculation = {'fd_original_thres': fd_thres}
+    if fd_thres != EXPECTED_FD_THRES:
+        try:
+            fd_perc, details = _recalculate_fd(candidate.path, iqm, tr_count, fd_thres)
+            fd_thres = EXPECTED_FD_THRES
+            calculation.update(details)
+        except FileNotFoundError:
+            flags.add('fd_thres_mismatch')
+        except (OSError, ValueError, TypeError, KeyError, csv.Error):
+            flags.update(('fd_thres_mismatch', 'invalid_fd_timeseries'))
     if "malformed_iqm" not in flags and "fd_thres_mismatch" not in flags:
         high_motion = fd_mean >= FD_MEAN_THRESHOLD
         if candidate.key.task != "rest":
@@ -253,8 +253,35 @@ def _read_motion_iqm(
             flags.add("excessive_motion")
     return MotionEvidence(
         candidate.key, fd_mean, fd_perc, dvars_std, fd_thres, report_path,
-        tuple(sorted(flags)),
+        tuple(sorted(flags)), **calculation,
     )
+
+
+def _recalculate_fd(path: Path, iqm: dict, tr_count: int | None, original_threshold: float):
+    """Reproduce MRIQC's original metrics before applying our framewise cutoff."""
+    series = path.with_name(path.name.replace('_bold.json', '_timeseries.tsv'))
+    metadata = json.loads(series.with_suffix('.json').read_text())
+    if metadata['framewise_displacement']['Units'] != 'mm':
+        raise ValueError('FD units must be mm')
+    with series.open(newline='') as stream:
+        values = [row['framewise_displacement'] for row in csv.DictReader(stream, delimiter='\t')]
+    if len(values) < 2 or values[0] != 'n/a':
+        raise ValueError('expected one initial undefined FD sample')
+    fd = [float(value) for value in values[1:]]
+    if any(not math.isfinite(value) or value < 0 for value in fd):
+        raise ValueError('invalid FD sample')
+    n, dummy = iqm['size_t'], iqm['dummy_trs']
+    if type(n) is not int or type(dummy) is not int or dummy < 0 or n != len(values) or n + dummy != tr_count:
+        raise ValueError('MRIQC timeseries does not match analyzed and BIDS frame counts')
+    # MRIQC's fd_perc includes the initial volume in its denominator; fd_mean does not.
+    original_percent = 100 * sum(value > original_threshold for value in fd) / n
+    if not (math.isclose(sum(fd) / len(fd), iqm['fd_mean'], rel_tol=1e-6, abs_tol=1e-8)
+            and math.isclose(original_percent, iqm['fd_perc'], rel_tol=1e-6, abs_tol=1e-8)):
+        raise ValueError('timeseries does not reproduce original MRIQC metrics')
+    return 100 * sum(value > EXPECTED_FD_THRES for value in fd) / n, {
+        'fd_method': 'verified_mriqc_timeseries', 'fd_source': str(series),
+        'fd_n_volumes': n, 'fd_dummy_trs': dummy,
+    }
 
 
 def _iqm_fd_thres(iqm: dict) -> float | None:

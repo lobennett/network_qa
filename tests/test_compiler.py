@@ -14,6 +14,33 @@ from network_qa.manifest import read_manifest
 STEM = 'sub-s01_ses-01_task-nBack_run-1'
 
 
+def test_recalculation_is_provenance_bound_and_tampering_is_flagged(tmp_path):
+    bids, mriqc, output = fixture(tmp_path)
+    iqm = mriqc / 'sub-s01/ses-01/func' / f'{STEM}_echo-2_bold.json'
+    value = json.loads(iqm.read_text())
+    value.update(size_t=18, dummy_trs=2, fd_perc=0)
+    value['provenance']['settings']['fd_thres'] = 0.2
+    iqm.write_text(json.dumps(value))
+    original = iqm.read_bytes()
+    series = iqm.with_name(iqm.name.replace('_bold.json', '_timeseries.tsv'))
+    series.write_text('framewise_displacement\nn/a\n' + '0.1\n' * 17)
+    series.with_suffix('.json').write_text('{"framewise_displacement":{"Units":"mm"}}')
+    compiler.compile_decisions(bids, mriqc, output)
+    metadata = json.loads(output.with_suffix('.meta.json').read_text())
+    calculation, = metadata['motion_calculations']
+    assert calculation['method'] == 'verified_mriqc_timeseries'
+    assert calculation['original_fd_thres'] == 0.2
+    assert calculation['fd_thres'] == 0.5
+    assert calculation['analyzed_volumes'] == 18
+    assert calculation['mriqc_dummy_trs'] == 2
+    assert any(r['path'].endswith('_timeseries.tsv') for r in metadata['mriqc_inventory'])
+    assert iqm.read_bytes() == original
+    series.write_text(series.read_text().replace('0.1', '0.6', 1))
+    compiler.compile_decisions(bids, mriqc, output)
+    functional = next(r for r in read_manifest(output) if r.key.datatype == 'func')
+    assert 'invalid_fd_timeseries' in functional.flags
+
+
 @pytest.mark.parametrize('administration', ['.git', '.hg', '.svn', '.bzr', '.jj', '.pijul',
                                           '_darcs', 'CVS', 'RCS', 'SCCS', '.fossil-settings'])
 def test_vcs_administration_does_not_enter_evidence_or_provenance(tmp_path, administration):

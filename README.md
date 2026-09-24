@@ -29,6 +29,11 @@ The command reads:
 It flags missing echoes, short scans, motion, missing behavior, and ambiguous anatomy.
 It also writes `scan_decisions.meta.json` with input inventories and checksums.
 
+Motion review uses echo 2: mean FD ≥0.2 mm, plus ≥20% of frames above 0.5 mm for
+tasks. If MRIQC used another framewise cutoff, matching timeseries can supply the
+0.5 mm percentage after reproducing its original metrics and verifying units and
+frame counts. Metadata records that calculation; original MRIQC files stay unchanged.
+
 ## Approve decisions
 
 After reviewing every row that requires approval:
