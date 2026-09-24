@@ -9,10 +9,15 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import stat
+import zipfile
 import tempfile
 
 from network_qa.anatomical import inspect_anatomicals
-from network_qa._evidence_paths import iter_evidence_files, reject_directory_symlink as _reject_directory_symlink
+from network_qa._evidence_paths import (
+    is_vcs_administration_path, iter_evidence_files,
+    reject_directory_symlink as _reject_directory_symlink,
+)
 from network_qa.exclusions.behavioral import behavioral_evidence
 from network_qa.exclusions.motion import inspect_motion
 from network_qa.functional import inspect_functionals
@@ -160,6 +165,138 @@ def _receipt_input_commit(mriqc_dir: Path, coverage: list[dict]) -> str | None:
     return next(iter(commits)) if len(commits) == 1 else None
 
 
+def _archive_member_records(archive: Path) -> list[dict]:
+    """Hash the subject evidence under the single MRIQC archive directory."""
+    subject = archive.name.split('_', 1)[0]
+    prefix, seen, records = None, set(), []
+    with zipfile.ZipFile(archive) as stream:
+        for member in stream.infolist():
+            parts = member.filename.rstrip('/').split('/')
+            if ('\\' in member.filename or '\x00' in member.orig_filename
+                    or any(part in {'', '.', '..'} for part in parts)
+                    or is_vcs_administration_path(Path(*parts))
+                    or stat.S_IFMT(member.external_attr >> 16) not in {0, stat.S_IFREG, stat.S_IFDIR}
+                    or member.flag_bits & 1 or member.filename in seen):
+                raise ValueError('unsafe or duplicate archive member')
+            seen.add(member.filename)
+            prefix = prefix or parts[0]
+            if parts[0] != prefix or not archive.name.startswith(subject + '_' + prefix):
+                raise ValueError('inconsistent archive directory prefix')
+            if member.is_dir():
+                continue
+            if len(parts) < 2:
+                raise ValueError('archive member lacks MRIQC directory prefix')
+            relative = Path(*parts[1:])
+            subjects = {match.group() for part in parts[1:]
+                        for match in re.finditer(r'sub-[A-Za-z0-9]+', part)}
+            if subjects and subjects != {subject}:
+                raise ValueError('archive member has wrong subject')
+            if relative == Path('dataset_description.json') or relative.suffix not in {'.json', '.html', '.tsv'}:
+                continue
+            if parts[1] == 'code':
+                raise ValueError('reserved archive evidence member')
+            if not subjects:
+                continue
+            digest = hashlib.sha256()
+            with stream.open(member) as content:
+                for chunk in iter(lambda: content.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            records.append({'path': relative.as_posix(), 'sha256': digest.hexdigest()})
+    return records
+
+
+def _archive_evidence_commit(mriqc_dir: Path) -> str | None:
+    """Verify the explicit archive handoff against its committed BABS snapshot.
+
+    This is extraction provenance, not a participant/group execution receipt.
+    The BABS raw gitlink, rather than a later raw HEAD, identifies MRIQC input.
+    """
+    receipt_path = mriqc_dir / 'code/network_fmri/mriqc-evidence.json'
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
+        if (not isinstance(receipt, dict) or receipt.get('schema_version') != 1
+                or receipt.get('kind') != 'babs-mriqc-evidence'
+                or receipt.get('raw_gitlink') != 'sourcedata/raw'):
+            return None
+        source_name = receipt['source_dataset_name']
+        if (not isinstance(source_name, str) or source_name in {'.', '..'}
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.+-]*', source_name)):
+            return None
+        source = mriqc_dir.parent / source_name
+        commit, input_commit = receipt['source_dataset_commit'], receipt['input_datalad_commit']
+        if (not source.is_absolute() or source.is_symlink() or source.resolve() != source
+                or _dataset_commit(source) is None
+                or any(not isinstance(value, str) or not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', value)
+                       for value in (commit, input_commit))
+                or _git(source, 'merge-base', '--is-ancestor', commit, 'HEAD') is None):
+            return None
+        identity = _git(source, 'config', '--blob', f'{commit}:.datalad/config', '--get', 'datalad.dataset.id')
+        if not identity or identity != receipt['source_dataset_id']:
+            return None
+        if _git(source, 'ls-tree', commit, '--', 'sourcedata/raw') != f'160000 commit {input_commit}\tsourcedata/raw':
+            return None
+        archives = receipt['archives']
+        if not isinstance(archives, list) or not archives:
+            return None
+        seen, archive_evidence = set(), []
+        for record in archives:
+            name = record['path']
+            if (not isinstance(name, str) or not re.fullmatch(r'sub-[A-Za-z0-9]+_[A-Za-z0-9_.+-]+\.zip', name)
+                    or name in seen):
+                return None
+            seen.add(name)
+            archive = source / name
+            current = _file_record(source, archive)
+            if current['status'] != 'available' or current['sha256'] != record['sha256']:
+                return None
+            listing = _git(source, 'ls-tree', commit, '--', name)
+            header, separator, stored_name = (listing or '').partition('\t')
+            fields = header.split()
+            if not separator or stored_name != name or len(fields) != 3 or fields[1] != 'blob':
+                return None
+            mode, _, oid = fields
+            if (mode == '120000') != archive.is_symlink():
+                return None
+            if archive.is_symlink():
+                target = os.fsencode(archive.readlink())
+                blob = hashlib.new('sha1' if len(commit) == 40 else 'sha256',
+                                   f'blob {len(target)}\0'.encode() + target).hexdigest()
+                key = re.fullmatch(r'(SHA256E?|MD5E?)-s([0-9]+)--([a-f0-9]+)(?:\..*)?', archive.readlink().name)
+                if key is None or archive.stat().st_size != int(key[2]):
+                    return None
+                digest = hashlib.sha256() if key[1].startswith('SHA256') else hashlib.md5(usedforsecurity=False)
+                with archive.open('rb') as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                        digest.update(chunk)
+                if digest.hexdigest() != key[3]:
+                    return None
+            else:
+                blob = _git(source, 'hash-object', '--no-filters', '--', name)
+            if blob != oid:
+                return None
+            archive_evidence.extend(_archive_member_records(archive))
+        tracked = _git(source, 'ls-tree', '-r', '--name-only', commit)
+        committed_archives = {name for name in (tracked or '').splitlines()
+                              if '/' not in name and name.startswith('sub-') and name.endswith('.zip')}
+        if seen != committed_archives:
+            return None
+        records = mriqc_inventory_records(mriqc_dir)
+        expected = sorted(receipt['evidence'], key=lambda row: row['path'])
+        actual = [{'path': row['path'], 'sha256': row['sha256']} for row in records
+                  if row['path'] != receipt_path.relative_to(mriqc_dir).as_posix()]
+        if any(row['status'] != 'available' for row in records) or expected != actual:
+            return None
+        # The receipt is editable: the immutable archive members must independently
+        # reproduce every retained evidence path and byte hash. Only the generated
+        # root derivative description is intentionally outside the ZIP projection.
+        retained = [row for row in actual if row['path'] != 'dataset_description.json']
+        if sorted(archive_evidence, key=lambda row: row['path']) != retained:
+            return None
+        return input_commit
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError, zipfile.BadZipFile, EOFError):
+        return None
+
+
 def _provenance(bids_dir, mriqc_dir):
     package_root = Path(__file__).resolve().parents[2]
     versions = set()
@@ -206,6 +343,14 @@ def _provenance(bids_dir, mriqc_dir):
                           else receipt_commit)
     input_basis = ('iqm-provenance' if complete and len(input_commits) == 1 else
                    'network_fmri-run-receipts' if receipt_commit else 'unavailable')
+    archive_receipt = mriqc_dir / 'code/network_fmri/mriqc-evidence.json'
+    archive_conflict = False
+    if archive_receipt.exists() or archive_receipt.is_symlink():
+        archive_commit = _archive_evidence_commit(mriqc_dir)
+        archive_conflict = bool(input_commits and input_commits != {archive_commit})
+        malformed = any(record['state'] not in {'valid', 'missing'} for record in coverage)
+        mriqc_input_commit = archive_commit if coverage and not archive_conflict and not malformed else None
+        input_basis = 'network_fmri-archive-evidence' if mriqc_input_commit else 'invalid-archive-evidence'
     package_commit = _dataset_commit(package_root)
     package_basis = 'source-checkout' if package_commit else 'unknown'
     package_status = _git(package_root, 'status', '--porcelain') if package_commit else None
@@ -232,7 +377,7 @@ def _provenance(bids_dir, mriqc_dir):
         'mriqc_input_commit_candidates': sorted(input_commits),
         'mriqc_input_commit_coverage': coverage,
         'mriqc_input_commit_coverage_scope': 'all-acquisition-iqms-in-mriqc-root',
-        'mriqc_input_commit_conflict': len(input_commits) > 1,
+        'mriqc_input_commit_conflict': len(input_commits) > 1 or archive_conflict,
         'mriqc_versions': sorted(versions),
         'package_commits': {'network_qa': package_commit},
         'package_versions': {'network_qa': version('network_qa')},

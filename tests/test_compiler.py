@@ -5,6 +5,7 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import pytest
+import zipfile
 
 from network_qa import compiler
 from network_qa.manifest import read_manifest
@@ -442,3 +443,194 @@ def test_malformed_iqm_provenance_is_explicit_and_cannot_borrow_dataset_commit(t
     assert provenance['mriqc_input_commit_coverage'] == [{
         'path': iqm.relative_to(paths[1]).as_posix(), 'state': 'malformed', 'input_commit': None,
     }]
+
+
+def archive_receipt_fixture(tmp_path):
+    import subprocess
+    bids, mriqc, output = fixture(tmp_path)
+    source = tmp_path / 'babs'
+    source.mkdir()
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(source), *args], text=True).strip()
+    git('init', '-q')
+    git('config', 'user.name', 'Test')
+    git('config', 'user.email', 'test@example.org')
+    (source / '.datalad').mkdir()
+    (source / '.datalad/config').write_text('[datalad "dataset"]\n id = babs-id\n')
+    archive = source / 'sub-s01_MRIQC.zip'
+    with zipfile.ZipFile(archive, 'w') as stream:
+        for record in compiler.mriqc_inventory_records(mriqc):
+            stream.write(mriqc / record['path'], 'MRIQC/' + record['path'])
+    git('add', '.')
+    git('update-index', '--add', '--cacheinfo', f'160000,{"a" * 40},sourcedata/raw')
+    git('commit', '-qm', 'merged')
+    receipt = {'schema_version': 1, 'kind': 'babs-mriqc-evidence',
+        'source_dataset_name': source.name, 'source_dataset_id': 'babs-id',
+        'source_dataset_commit': git('rev-parse', 'HEAD'), 'raw_gitlink': 'sourcedata/raw',
+        'input_datalad_commit': 'a' * 40,
+        'archives': [{'path': archive.name, 'sha256': hashlib.sha256(archive.read_bytes()).hexdigest()}],
+        'evidence': [{'path': r['path'], 'sha256': r['sha256']} for r in compiler.mriqc_inventory_records(mriqc)]}
+    path = mriqc / 'code/network_fmri/mriqc-evidence.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(receipt))
+    return bids, mriqc, source, path, receipt, git
+
+
+def test_archive_evidence_supplies_pinned_raw_commit_without_fake_run_receipts(tmp_path):
+    bids, mriqc, source, path, receipt, git = archive_receipt_fixture(tmp_path)
+    git('commit', '--allow-empty', '-qm', 'later milestone')
+    provenance = compiler._provenance(bids, mriqc)
+    assert provenance['mriqc_input_commit'] == 'a' * 40
+    assert provenance['mriqc_input_commit_basis'] == 'network_fmri-archive-evidence'
+    assert not provenance['mriqc_input_commit_conflict']
+
+
+@pytest.mark.parametrize('damage', ['archive', 'evidence', 'identity', 'pin', 'commit', 'duplicate', 'unsafe', 'malformed', 'conflicting-iqm'])
+def test_archive_evidence_cannot_supply_unverified_or_conflicting_provenance(tmp_path, damage):
+    bids, mriqc, source, path, receipt, git = archive_receipt_fixture(tmp_path)
+    if damage == 'archive':
+        (source / receipt['archives'][0]['path']).write_bytes(b'changed')
+    elif damage == 'evidence':
+        next(mriqc.glob('*.html')).write_text('changed')
+    elif damage == 'identity':
+        receipt['source_dataset_id'] = 'wrong'
+    elif damage == 'pin':
+        receipt['input_datalad_commit'] = 'b' * 40
+    elif damage == 'commit':
+        receipt['source_dataset_commit'] = 'b' * 40
+    elif damage == 'duplicate':
+        receipt['archives'] *= 2
+    elif damage == 'unsafe':
+        receipt['archives'][0]['path'] = '../escape.zip'
+    elif damage == 'conflicting-iqm':
+        iqm = next(mriqc.rglob('*_bold.json'))
+        data = json.loads(iqm.read_text())
+        data['provenance']['input_commit'] = 'b' * 40
+        iqm.write_text(json.dumps(data))
+        receipt['evidence'] = [{'path': r['path'], 'sha256': r['sha256']} for r in compiler.mriqc_inventory_records(mriqc) if r['path'] != path.relative_to(mriqc).as_posix()]
+        # The conflicting IQM must itself be bound to the archive, so the test
+        # isolates conflicting input provenance from evidence tampering.
+        archive = source / receipt['archives'][0]['path']
+        with zipfile.ZipFile(archive, 'w') as stream:
+            for record in receipt['evidence']:
+                stream.write(mriqc / record['path'], 'MRIQC/' + record['path'])
+        git('add', archive.name)
+        git('commit', '-qm', 'conflicting IQM provenance in source archive')
+        receipt['source_dataset_commit'] = git('rev-parse', 'HEAD')
+        receipt['archives'][0]['sha256'] = hashlib.sha256(archive.read_bytes()).hexdigest()
+    path.write_text('[]' if damage == 'malformed' else json.dumps(receipt))
+    provenance = compiler._provenance(bids, mriqc)
+    assert provenance['mriqc_input_commit'] is None
+
+
+@pytest.mark.parametrize('damage', [None, 'corrupt', 'missing'])
+def test_archive_receipt_verifies_committed_annex_key_and_bytes(tmp_path, damage):
+    bids, mriqc, source, path, receipt, git = archive_receipt_fixture(tmp_path)
+    archive = source / receipt['archives'][0]['path']
+    content = archive.read_bytes()
+    key = f'SHA256E-s{len(content)}--{hashlib.sha256(content).hexdigest()}.zip'
+    obj = source / '.git/annex/objects/aa/bb' / key / key
+    obj.parent.mkdir(parents=True)
+    obj.write_bytes(content)
+    archive.unlink()
+    archive.symlink_to(obj.relative_to(source))
+    git('add', archive.name)
+    git('commit', '-qm', 'annex archive')
+    receipt['source_dataset_commit'] = git('rev-parse', 'HEAD')
+    path.write_text(json.dumps(receipt))
+    if damage == 'corrupt':
+        obj.write_bytes(b'corrupt bytes')
+        # Even updating the receipt hash must not evade the committed annex key.
+        receipt['archives'][0]['sha256'] = hashlib.sha256(obj.read_bytes()).hexdigest()
+        path.write_text(json.dumps(receipt))
+    elif damage == 'missing':
+        obj.unlink()
+    assert compiler._provenance(bids, mriqc)['mriqc_input_commit'] == ('a' * 40 if damage is None else None)
+
+
+def test_archive_provenance_survives_review_seal_and_milestones_but_not_archive_edit(tmp_path, monkeypatch):
+    from dataclasses import replace
+    import subprocess
+    from network_qa.approval import seal_approval, validate_approval
+    from network_qa.manifest import write_manifest
+    bids, mriqc, source, path, receipt, git = archive_receipt_fixture(tmp_path)
+    def local(root, *args):
+        return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+    for root in (bids, mriqc):
+        local(root, 'init', '-q')
+        local(root, 'config', 'user.name', 'Test')
+        local(root, 'config', 'user.email', 'test@example.org')
+    local(bids, 'add', '.')
+    local(bids, 'commit', '-qm', 'MRIQC raw inputs')
+    pin = local(bids, 'rev-parse', 'HEAD')
+    git('update-index', '--add', '--cacheinfo', f'160000,{pin},sourcedata/raw')
+    git('commit', '-qm', 'pin raw')
+    receipt.update(source_dataset_commit=git('rev-parse', 'HEAD'), input_datalad_commit=pin)
+    path.write_text(json.dumps(receipt))
+    local(mriqc, 'add', '.')
+    local(mriqc, 'commit', '-qm', 'materialized evidence')
+    package = Path(compiler.__file__).resolve().parents[2]
+    original_git = compiler._git
+    monkeypatch.setattr(compiler, '_git', lambda root, *args:
+        '' if root == package and args == ('status', '--porcelain') else original_git(root, *args))
+    manifest = tmp_path / 'review/scan_decisions.tsv'
+    compiler.compile_decisions(bids, mriqc, manifest)
+    write_manifest(manifest, [replace(row, decision='keep', approved=True, reason_code='other',
+        reason_detail='Reviewed', reviewer='Alice', reviewed_at='2026-09-23') for row in read_manifest(manifest)])
+    result = seal_approval(manifest, manifest.with_suffix('.meta.json'), bids)
+    assert result.ok, result.errors
+    for root in (bids, mriqc, source):
+        local(root, 'commit', '--allow-empty', '-qm', 'later milestone')
+    result = validate_approval(manifest, manifest.with_suffix('.meta.json'), bids)
+    assert result.ok, result.errors
+    (source / receipt['archives'][0]['path']).write_bytes(b'corrupted archive')
+    assert not validate_approval(manifest, manifest.with_suffix('.meta.json'), bids).ok
+
+
+@pytest.mark.parametrize('change', ['iqm', 'extra', 'missing'])
+def test_updated_receipt_cannot_certify_evidence_absent_from_committed_zip(tmp_path, change):
+    bids, mriqc, source, path, receipt, git = archive_receipt_fixture(tmp_path)
+    iqm = next(mriqc.rglob('*_bold.json'))
+    if change == 'iqm':
+        data = json.loads(iqm.read_text())
+        data['fd_mean'] = .001
+        iqm.write_text(json.dumps(data))
+    elif change == 'extra':
+        (mriqc / 'sub-s01_extra.html').write_text('not in source archive')
+    else:
+        next(mriqc.glob('*.html')).unlink()
+    receipt['evidence'] = [{'path': r['path'], 'sha256': r['sha256']}
+        for r in compiler.mriqc_inventory_records(mriqc)
+        if r['path'] != path.relative_to(mriqc).as_posix()]
+    path.write_text(json.dumps(receipt))
+    assert compiler._archive_evidence_commit(mriqc) is None
+
+
+
+def test_archive_receipt_remains_valid_when_canonical_study_is_relocated(tmp_path):
+    bids, mriqc, source, path, receipt, git = archive_receipt_fixture(tmp_path)
+    restored = tmp_path / 'restored'
+    restored.mkdir()
+    source.rename(restored / source.name)
+    mriqc.rename(restored / mriqc.name)
+    assert compiler._archive_evidence_commit(restored / mriqc.name) == 'a' * 40
+
+
+@pytest.mark.parametrize('source_name', ['../babs', '/babs', 'a/babs', 'a\\babs', '.', '..'])
+def test_archive_source_must_be_a_single_sibling_basename(tmp_path, source_name):
+    bids, mriqc, source, path, receipt, git = archive_receipt_fixture(tmp_path)
+    receipt['source_dataset_name'] = source_name
+    path.write_text(json.dumps(receipt))
+    assert compiler._archive_evidence_commit(mriqc) is None
+
+
+
+def test_archive_receipt_cannot_omit_a_committed_subject_archive(tmp_path):
+    bids, mriqc, source, path, receipt, git = archive_receipt_fixture(tmp_path)
+    archive = source / 'sub-s02_MRIQC.zip'
+    archive.write_bytes((source / receipt['archives'][0]['path']).read_bytes())
+    git('add', archive.name)
+    git('commit', '-qm', 'additional merged subject archive')
+    receipt['source_dataset_commit'] = git('rev-parse', 'HEAD')
+    path.write_text(json.dumps(receipt))
+    assert compiler._archive_evidence_commit(mriqc) is None
